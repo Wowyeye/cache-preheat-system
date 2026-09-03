@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'c376c893-12f6-4bd2-8c1d-f6cafc81ffcc'
-  PropagateID: 'c376c893-12f6-4bd2-8c1d-f6cafc81ffcc'
-  ReservedCode1: '81a52a6c-0be2-4494-a29b-b4c7a85581eb'
-  ReservedCode2: '81a52a6c-0be2-4494-a29b-b4c7a85581eb'
+  ProduceID: '22eeb10b-948e-4cfa-acba-f42dfe97d00e'
+  PropagateID: '22eeb10b-948e-4cfa-acba-f42dfe97d00e'
+  ReservedCode1: '1a016c86-ddee-4d1f-9e47-aa2c5fe92211'
+  ReservedCode2: '1a016c86-ddee-4d1f-9e47-aa2c5fe92211'
 ---
 
 # 热点数据缓存预热与缓存一致性保障系统
@@ -100,7 +100,7 @@ mvn spring-boot:run
 启动后自动执行缓存预热，控制台会输出预热日志。
 
 ### 5. 打开前端
-直接用浏览器打开 `frontend/index.html` 即可。
+直接用浏览器打开 `frontend/index.html` 即可（后端已配置 CORS，支持跨域访问）。
 
 ## 五、六大缓存策略详解
 
