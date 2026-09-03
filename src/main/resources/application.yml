@@ -12,7 +12,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/cache_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
     username: root
-    password: your-mysql-password
+    password: "${MYSQL_PASSWORD:your-mysql-password}"   # 本机真实密码见 local-secret.txt（不入库）
     # Druid 连接池参数
     druid:
       initial-size: 5
@@ -27,7 +27,7 @@ spring:
   redis:
     host: 127.0.0.1
     port: 6379
-    password: your-redis-password   # Redis 密码，取自 redis.conf 的 requirepass
+    password: "${REDIS_PASSWORD:your-redis-password}"   # 本机真实密码见 local-secret.txt（不入库）
     database: 0         # 使用 0 号数据库
     timeout: 5000ms     # 连接超时时间
     lettuce:
