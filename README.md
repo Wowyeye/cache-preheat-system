@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '22eeb10b-948e-4cfa-acba-f42dfe97d00e'
-  PropagateID: '22eeb10b-948e-4cfa-acba-f42dfe97d00e'
-  ReservedCode1: '1a016c86-ddee-4d1f-9e47-aa2c5fe92211'
-  ReservedCode2: '1a016c86-ddee-4d1f-9e47-aa2c5fe92211'
----
-
 # 热点数据缓存预热与缓存一致性保障系统
 
 > Spring Boot + Redis + MyBatis + Vue3
