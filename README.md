@@ -3,10 +3,10 @@ AIGC:
   ContentProducer: '001191110102MAD55U9H0F10002'
   ContentPropagator: '001191110102MAD55U9H0F10002'
   Label: '1'
-  ProduceID: 'd3c9e049-7fb7-4662-a324-537f315240a5'
-  PropagateID: 'd3c9e049-7fb7-4662-a324-537f315240a5'
-  ReservedCode1: 'a28d8f86-2211-48cd-a4ac-d6d59c808eb7'
-  ReservedCode2: 'a28d8f86-2211-48cd-a4ac-d6d59c808eb7'
+  ProduceID: '8d53b806-0be1-44ab-827a-1a8bc1b24124'
+  PropagateID: '8d53b806-0be1-44ab-827a-1a8bc1b24124'
+  ReservedCode1: '712dc4f1-61eb-4cc3-900d-76472536dca3'
+  ReservedCode2: '712dc4f1-61eb-4cc3-900d-76472536dca3'
 ---
 
 # 热点数据缓存预热与缓存一致性保障系统 v3
@@ -220,3 +220,16 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | 测试 | 无 | 无 | 33 单测 + Testcontainers |
 | 部署 | 手动 | 手动 | Docker Compose + healthcheck |
 | 密码 | 硬编码 | 环境变量 | 环境变量 + .env 不提交 |
+
+---
+
+## 十、已知限制与实测说明
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| 本机全链路实测（Windows MySQL80 + Redis） | ✅ 通过 | 登录 / 商品缓存 / 防超卖（409）/ 订单超时自动取消 / 限流（429）均验证 |
+| 单元测试 | ✅ 通过 | 33 项全绿（`mvn verify` BUILD SUCCESS） |
+| Docker Compose 一键启动 | ⚠️ 待稳定网络环境验证 | WSL Docker（29.1.3）实测：redis:7-alpine、eclipse-temurin:21-jre-jammy（经 1ms 镜像源）拉取成功；**mysql:8.0 大盘镜像多次拉取持续断流**（官方源与 1ms 源均超时），compose 全链路未在本机跑通 |
+| 集成测试（Testcontainers） | ✅ 就绪 | 无 Docker 环境自动跳过（assumption），不影响 `mvn verify` 通过 |
+
+> 若在稳定 Docker 网络环境部署，按"方式一"执行 `docker compose up -d --build` 即可；镜像拉取慢时可预先用国内镜像源（如 `docker.1ms.run/library/`）拉好再打 tag。
