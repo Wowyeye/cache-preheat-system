@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>订单审核 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <style>
+        .order-card {
+            background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+            margin-bottom: 16px; overflow: hidden;
+        }
+        .order-card .order-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 20px; background: #f9f9fb; border-bottom: 1px solid #f0f0f0;
+        }
+        .order-card .order-head .left { display: flex; gap: 20px; font-size: 13px; color: #606266; }
+        .order-card .order-body { padding: 16px 20px; }
+        .order-card .order-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 0; border-bottom: 1px dashed #f0f0f0;
+        }
+        .order-card .order-item:last-child { border-bottom: none; }
+        .order-card .order-item .item-name { font-size: 14px; }
+        .order-card .order-item .item-info { font-size: 12px; color: #909399; }
+        .order-card .order-item .item-subtotal { font-size: 14px; color: #f56c6c; font-weight: bold; }
+        .order-card .order-footer {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 20px; border-top: 1px solid #f0f0f0;
+        }
+        .order-card .order-total { font-size: 16px; font-weight: bold; }
+        .order-card .order-total .amount { color: #f56c6c; font-size: 20px; }
+        .order-card .order-actions { display: flex; gap: 8px; }
+        .reason-text { font-size: 12px; color: #e6a23c; margin-top: 4px; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            管理员审核退款/退货申请：通过则自动回补库存并触发延迟双删；拒绝则订单退回已支付状态。
+        </div>
+
+        <!-- 状态筛选 -->
+        <div class="panel" style="display:flex; gap:10px; align-items:center;">
+            <el-radio-group v-model="filterStatus" @change="filterChange">
+                <el-radio-button label="">全部</el-radio-button>
+                <el-radio-button label="PENDING_PAYMENT">待支付</el-radio-button>
+                <el-radio-button label="PAID">已支付</el-radio-button>
+                <el-radio-button label="REFUNDING">退款中</el-radio-button>
+                <el-radio-button label="RETURNING">退货中</el-radio-button>
+                <el-radio-button label="COMPLETED">已完成</el-radio-button>
+                <el-radio-button label="REFUNDED">已退款</el-radio-button>
+                <el-radio-button label="RETURNED">已退货</el-radio-button>
+                <el-radio-button label="CANCELLED">已取消</el-radio-button>
+            </el-radio-group>
+            <el-button @click="loadOrders" style="margin-left:auto">刷新</el-button>
+        </div>
+
+        <!-- 订单列表 -->
+        <div v-if="filtered.length === 0" class="panel" style="text-align:center; padding:40px; color:#909399;">
+            暂无订单
+        </div>
+
+        <div v-for="o in filtered" :key="o.id" class="order-card">
+            <div class="order-head">
+                <div class="left">
+                    <span>订单号：{{ o.orderNo }}</span>
+                    <span>用户ID：{{ o.userId }}</span>
+                    <span>下单时间：{{ formatTime(o.createTime) }}</span>
+                </div>
+                <el-tag :type="statusTagType(o.status)">{{ statusLabel(o.status) }}</el-tag>
+            </div>
+            <div class="order-body">
+                <div v-for="item in o.items" :key="item.id" class="order-item">
+                    <div>
+                        <div class="item-name">{{ item.productName }}</div>
+                        <div class="item-info">¥{{ item.productPrice }} × {{ item.quantity }}</div>
+                    </div>
+                    <div class="item-subtotal">¥{{ item.subtotal }}</div>
+                </div>
+                <div v-if="o.remark && (o.status === 'REFUNDING' || o.status === 'RETURNING')" class="reason-text">
+                    申请原因：{{ o.remark }}
+                </div>
+            </div>
+            <div class="order-footer">
+                <div class="order-total">
+                    共 {{ totalQty(o) }} 件商品　合计：<span class="amount">¥{{ o.totalAmount }}</span>
+                </div>
+                <div class="order-actions">
+                    <!-- 退款中 -->
+                    <el-button v-if="o.status === 'REFUNDING'" type="success" size="small" @click="approveRefund(o)">通过退款</el-button>
+                    <el-button v-if="o.status === 'REFUNDING'" type="danger" size="small" plain @click="reject(o)">拒绝</el-button>
+                    <!-- 退货中 -->
+                    <el-button v-if="o.status === 'RETURNING'" type="success" size="small" @click="approveReturn(o)">通过退货</el-button>
+                    <el-button v-if="o.status === 'RETURNING'" type="danger" size="small" plain @click="reject(o)">拒绝</el-button>
+                    <!-- 其他状态只显示标签 -->
+                    <el-tag v-if="o.status === 'PAID'" type="success" size="small">已支付</el-tag>
+                    <el-tag v-if="o.status === 'COMPLETED'" type="success" size="small">交易完成</el-tag>
+                    <el-tag v-if="o.status === 'REFUNDED'" type="info" size="small">退款已到账</el-tag>
+                    <el-tag v-if="o.status === 'RETURNED'" type="info" size="small">退货已完成</el-tag>
+                    <el-tag v-if="o.status === 'PENDING_PAYMENT'" type="warning" size="small">等待用户支付</el-tag>
+                    <el-tag v-if="o.status === 'CANCELLED'" type="info" size="small">已取消</el-tag>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 拒绝原因弹窗 -->
+    <el-dialog v-model="rejectVisible" title="审核拒绝" width="440px">
+        <el-input v-model="rejectReason" type="textarea" :rows="4" placeholder="请输入拒绝原因（选填）"></el-input>
+        <template #footer>
+            <el-button @click="rejectVisible = false">取消</el-button>
+            <el-button type="primary" :loading="submitting" @click="confirmReject">确认拒绝</el-button>
+        </template>
+    </el-dialog>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, computed, onMounted } = Vue;
+
+    createApp({
+        setup() {
+            const state = reactive({
+                orders: [], filterStatus: '',
+                rejectVisible: false, rejectReason: '',
+                currentOrder: null, submitting: false
+            });
+
+            const STATUS_MAP = {
+                PENDING_PAYMENT: '待支付', PAID: '已支付', COMPLETED: '已完成',
+                CANCELLED: '已取消', REFUNDING: '退款中', REFUNDED: '已退款',
+                RETURNING: '退货中', RETURNED: '已退货'
+            };
+            const STATUS_TAG_TYPE = {
+                PENDING_PAYMENT: 'warning', PAID: 'success', COMPLETED: 'success',
+                CANCELLED: 'info', REFUNDING: 'warning', REFUNDED: 'info',
+                RETURNING: 'warning', RETURNED: 'info'
+            };
+
+            async function loadOrders() {
+                try {
+                    state.orders = await apiGet('/api/admin/order/list');
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            const filtered = computed(() =>
+                state.filterStatus ? state.orders.filter(o => o.status === state.filterStatus) : state.orders
+            );
+
+            function statusLabel(s) { return STATUS_MAP[s] || s; }
+            function statusTagType(s) { return STATUS_TAG_TYPE[s] || 'info'; }
+            function formatTime(t) { return t ? t.replace('T', ' ').substring(0, 19) : '--'; }
+            function totalQty(o) { return (o.items || []).reduce((s, i) => s + i.quantity, 0); }
+
+            async function approveRefund(o) {
+                try {
+                    await ElementPlus.ElMessageBox.confirm('确认通过退款？将自动回补库存。', '退款审核', { type: 'warning' });
+                } catch (e) { return; }
+                try {
+                    await apiSend('/api/admin/order/' + o.id + '/refund/approve', 'POST');
+                    showToast('退款已通过，库存已回补', 'success');
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            async function approveReturn(o) {
+                try {
+                    await ElementPlus.ElMessageBox.confirm('确认通过退货？将自动回补库存。', '退货审核', { type: 'warning' });
+                } catch (e) { return; }
+                try {
+                    await apiSend('/api/admin/order/' + o.id + '/return/approve', 'POST');
+                    showToast('退货已通过，库存已回补', 'success');
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            function reject(o) {
+                state.currentOrder = o;
+                state.rejectReason = '';
+                state.rejectVisible = true;
+            }
+
+            async function confirmReject() {
+                state.submitting = true;
+                try {
+                    await apiSend('/api/admin/order/' + state.currentOrder.id + '/reject', 'POST', { reason: state.rejectReason });
+                    showToast('已拒绝，订单退回已支付状态', 'success');
+                    state.rejectVisible = false;
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+                state.submitting = false;
+            }
+
+            function filterChange() {}
+
+            onMounted(() => {
+                renderHeader('adminOrders');
+                loadOrders();
+            });
+
+            return {
+                filtered,
+                get filterStatus() { return state.filterStatus; }, set filterStatus(v) { state.filterStatus = v; },
+                get rejectVisible() { return state.rejectVisible; }, set rejectVisible(v) { state.rejectVisible = v; },
+                get rejectReason() { return state.rejectReason; }, set rejectReason(v) { state.rejectReason = v; },
+                get submitting() { return state.submitting; },
+                loadOrders, statusLabel, statusTagType, formatTime, totalQty,
+                approveRefund, approveReturn, reject, confirmReject, filterChange
+            };
+        }
+    }).use(ElementPlus, { locale: ElementPlusLocaleZhCn }).mount('#app');
+</script>
+</body>
+</html>

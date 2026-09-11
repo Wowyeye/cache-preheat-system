@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的订单 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <style>
+        .order-card {
+            background: #fff; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+            margin-bottom: 16px; overflow: hidden;
+        }
+        .order-card .order-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 20px; background: #f9f9fb; border-bottom: 1px solid #f0f0f0;
+        }
+        .order-card .order-head .left { display: flex; gap: 20px; font-size: 13px; color: #606266; }
+        .order-card .order-body { padding: 16px 20px; }
+        .order-card .order-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 0; border-bottom: 1px dashed #f0f0f0;
+        }
+        .order-card .order-item:last-child { border-bottom: none; }
+        .order-card .order-item .item-name { font-size: 14px; }
+        .order-card .order-item .item-info { font-size: 12px; color: #909399; }
+        .order-card .order-item .item-subtotal { font-size: 14px; color: #f56c6c; font-weight: bold; }
+        .order-card .order-footer {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 20px; border-top: 1px solid #f0f0f0;
+        }
+        .order-card .order-total { font-size: 16px; font-weight: bold; }
+        .order-card .order-total .amount { color: #f56c6c; font-size: 20px; }
+        .order-card .order-actions { display: flex; gap: 8px; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            订单状态流转：待支付 → 已支付 → 已完成；已支付可发起退款/退货申请，待管理员审核。
+            所有库存变更（下单扣减/取消回补/退款回补/退货回补）均触发<b>延迟双删</b>保障缓存一致性。
+        </div>
+
+        <!-- 状态筛选 -->
+        <div class="panel" style="display:flex; gap:10px; align-items:center;">
+            <el-radio-group v-model="filterStatus" @change="filterChange">
+                <el-radio-button label="">全部</el-radio-button>
+                <el-radio-button label="PENDING_PAYMENT">待支付</el-radio-button>
+                <el-radio-button label="PAID">已支付</el-radio-button>
+                <el-radio-button label="COMPLETED">已完成</el-radio-button>
+                <el-radio-button label="REFUNDING">退款中</el-radio-button>
+                <el-radio-button label="REFUNDED">已退款</el-radio-button>
+                <el-radio-button label="RETURNING">退货中</el-radio-button>
+                <el-radio-button label="RETURNED">已退货</el-radio-button>
+                <el-radio-button label="CANCELLED">已取消</el-radio-button>
+            </el-radio-group>
+            <el-button @click="loadOrders" style="margin-left:auto">刷新</el-button>
+        </div>
+
+        <!-- 订单列表 -->
+        <div v-if="filtered.length === 0" class="panel" style="text-align:center; padding:40px; color:#909399;">
+            暂无订单
+        </div>
+
+        <div v-for="o in filtered" :key="o.id" class="order-card">
+            <div class="order-head">
+                <div class="left">
+                    <span>订单号：{{ o.orderNo }}</span>
+                    <span>下单时间：{{ formatTime(o.createTime) }}</span>
+                </div>
+                <el-tag :type="statusTagType(o.status)">{{ statusLabel(o.status) }}</el-tag>
+            </div>
+            <div class="order-body">
+                <div v-for="item in o.items" :key="item.id" class="order-item">
+                    <div>
+                        <div class="item-name">{{ item.productName }}</div>
+                        <div class="item-info">¥{{ item.productPrice }} × {{ item.quantity }}</div>
+                    </div>
+                    <div class="item-subtotal">¥{{ item.subtotal }}</div>
+                </div>
+                <div v-if="o.remark" style="margin-top:8px; font-size:12px; color:#909399;">备注：{{ o.remark }}</div>
+            </div>
+            <div class="order-footer">
+                <div class="order-total">
+                    共 {{ totalQty(o) }} 件商品　合计：<span class="amount">¥{{ o.totalAmount }}</span>
+                </div>
+                <div class="order-actions">
+                    <!-- 待支付：去支付 / 取消 -->
+                    <el-button v-if="o.status === 'PENDING_PAYMENT'" type="primary" size="small" @click="payOrder(o)">去支付</el-button>
+                    <el-button v-if="o.status === 'PENDING_PAYMENT'" type="warning" size="small" plain @click="cancelOrder(o)">取消订单</el-button>
+                    <!-- 已支付：申请退款 / 申请退货 -->
+                    <el-button v-if="o.status === 'PAID'" type="danger" size="small" plain @click="applyRefund(o)">申请退款</el-button>
+                    <el-button v-if="o.status === 'PAID'" type="warning" size="small" plain @click="applyReturn(o)">申请退货</el-button>
+                    <!-- 退款中/退货中：等待审核，可取消申请 -->
+                    <el-tag v-if="o.status === 'REFUNDING'" type="warning" size="small">等待管理员审核退款</el-tag>
+                    <el-tag v-if="o.status === 'RETURNING'" type="warning" size="small">等待管理员审核退货</el-tag>
+                    <!-- 终态 -->
+                    <el-tag v-if="o.status === 'COMPLETED'" type="success" size="small">交易完成</el-tag>
+                    <el-tag v-if="o.status === 'REFUNDED'" type="info" size="small">退款已到账</el-tag>
+                    <el-tag v-if="o.status === 'RETURNED'" type="info" size="small">退货已完成</el-tag>
+                    <el-tag v-if="o.status === 'CANCELLED'" type="info" size="small">订单已取消</el-tag>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 退款/退货原因弹窗 -->
+    <el-dialog v-model="reasonVisible" :title="reasonTitle" width="440px">
+        <el-input v-model="reasonText" type="textarea" :rows="4" placeholder="请输入退款/退货原因（选填）"></el-input>
+        <template #footer>
+            <el-button @click="reasonVisible = false">取消</el-button>
+            <el-button type="primary" :loading="submitting" @click="confirmReason">提交申请</el-button>
+        </template>
+    </el-dialog>
+
+    <!-- 支付弹窗 -->
+    <el-dialog v-model="payVisible" :title="'订单 ' + (currentOrder?.orderNo || '')" width="400px">
+        <div style="text-align:center; padding:20px 0;">
+            <div style="font-size:14px; color:#909399; margin-bottom:8px;">待支付金额</div>
+            <div style="font-size:32px; color:#f56c6c; font-weight:bold; margin-bottom:24px;">¥{{ currentOrder?.totalAmount || 0 }}</div>
+            <el-button type="primary" size="large" style="width:100%;" :loading="paying" @click="confirmPay">确认支付</el-button>
+        </div>
+    </el-dialog>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, computed, onMounted } = Vue;
+
+    createApp({
+        setup() {
+            const state = reactive({
+                orders: [], filterStatus: '',
+                reasonVisible: false, reasonTitle: '', reasonText: '',
+                currentOrder: null, currentAction: null,
+                submitting: false,
+                payVisible: false, paying: false
+            });
+
+            const STATUS_MAP = {
+                PENDING_PAYMENT: '待支付', PAID: '已支付', COMPLETED: '已完成',
+                CANCELLED: '已取消', REFUNDING: '退款中', REFUNDED: '已退款',
+                RETURNING: '退货中', RETURNED: '已退货'
+            };
+            const STATUS_TAG_TYPE = {
+                PENDING_PAYMENT: 'warning', PAID: 'success', COMPLETED: 'success',
+                CANCELLED: 'info', REFUNDING: 'warning', REFUNDED: 'info',
+                RETURNING: 'warning', RETURNED: 'info'
+            };
+
+            async function loadOrders() {
+                try {
+                    state.orders = await apiGet('/api/order/my');
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            const filtered = computed(() =>
+                state.filterStatus ? state.orders.filter(o => o.status === state.filterStatus) : state.orders
+            );
+
+            function statusLabel(s) { return STATUS_MAP[s] || s; }
+            function statusTagType(s) { return STATUS_TAG_TYPE[s] || 'info'; }
+            function formatTime(t) { return t ? t.replace('T', ' ').substring(0, 19) : '--'; }
+            function totalQty(o) { return (o.items || []).reduce((s, i) => s + i.quantity, 0); }
+
+            function payOrder(o) {
+                state.currentOrder = o;
+                state.payVisible = true;
+            }
+
+            async function confirmPay() {
+                state.paying = true;
+                try {
+                    await apiSend('/api/order/' + state.currentOrder.id + '/pay', 'POST');
+                    showToast('支付成功', 'success');
+                    state.payVisible = false;
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+                state.paying = false;
+            }
+
+            async function cancelOrder(o) {
+                try {
+                    await ElementPlus.ElMessageBox.confirm('确定取消该订单吗？库存将自动回补。', '取消订单', { type: 'warning' });
+                } catch (e) { return; }
+                try {
+                    await apiSend('/api/order/' + o.id + '/cancel', 'POST');
+                    showToast('订单已取消', 'success');
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            function applyRefund(o) {
+                state.currentOrder = o;
+                state.currentAction = 'refund';
+                state.reasonTitle = '申请退款';
+                state.reasonText = '';
+                state.reasonVisible = true;
+            }
+
+            function applyReturn(o) {
+                state.currentOrder = o;
+                state.currentAction = 'return';
+                state.reasonTitle = '申请退货';
+                state.reasonText = '';
+                state.reasonVisible = true;
+            }
+
+            async function confirmReason() {
+                state.submitting = true;
+                try {
+                    const id = state.currentOrder.id;
+                    if (state.currentAction === 'refund') {
+                        await apiSend('/api/order/' + id + '/refund', 'POST', { reason: state.reasonText });
+                    } else {
+                        await apiSend('/api/order/' + id + '/return', 'POST', { reason: state.reasonText });
+                    }
+                    showToast('申请已提交，等待管理员审核', 'success');
+                    state.reasonVisible = false;
+                    loadOrders();
+                } catch (e) { showToast(e.message, 'error'); }
+                state.submitting = false;
+            }
+
+            function filterChange() { /* computed 自动响应 */ }
+
+            onMounted(() => {
+                renderHeader('myOrders');
+                loadOrders();
+            });
+
+            return {
+                filtered,
+                get filterStatus() { return state.filterStatus; }, set filterStatus(v) { state.filterStatus = v; },
+                get reasonVisible() { return state.reasonVisible; }, set reasonVisible(v) { state.reasonVisible = v; },
+                get reasonTitle() { return state.reasonTitle; },
+                get reasonText() { return state.reasonText; }, set reasonText(v) { state.reasonText = v; },
+                get payVisible() { return state.payVisible; }, set payVisible(v) { state.payVisible = v; },
+                get currentOrder() { return state.currentOrder; },
+                get submitting() { return state.submitting; },
+                get paying() { return state.paying; },
+                loadOrders, statusLabel, statusTagType, formatTime, totalQty,
+                payOrder, confirmPay, cancelOrder, applyRefund, applyReturn, confirmReason, filterChange
+            };
+        }
+    }).use(ElementPlus, { locale: ElementPlusLocaleZhCn }).mount('#app');
+</script>
+</body>
+</html>

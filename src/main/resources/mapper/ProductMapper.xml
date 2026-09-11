@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!-- 商品 Mapper XML，对应 com.jyu.cache.mapper.ProductMapper 接口 -->
+<mapper namespace="com.jyu.cache.mapper.ProductMapper">
+
+    <!-- 结果映射：数据库字段（下划线）-> Java 属性（驼峰） -->
+    <resultMap id="productMap" type="com.jyu.cache.entity.Product">
+        <id     property="id"          column="id"/>
+        <result property="name"        column="name"/>
+        <result property="categoryId"  column="category_id"/>
+        <result property="price"       column="price"/>
+        <result property="stock"       column="stock"/>
+        <result property="description" column="description"/>
+        <result property="status"      column="status"/>
+        <result property="viewCount"   column="view_count"/>
+        <result property="createTime"  column="create_time"/>
+        <result property="updateTime"  column="update_time"/>
+    </resultMap>
+
+    <!-- 公共列名列表，方便复用 -->
+    <sql id="columns">
+        id, name, category_id, price, stock, description, status, view_count, create_time, update_time
+    </sql>
+
+    <!-- 根据ID查询 -->
+    <select id="selectById" resultMap="productMap">
+        SELECT <include refid="columns"/>
+        FROM product
+        WHERE id = #{id}
+    </select>
+
+    <!-- 查询所有商品 -->
+    <select id="selectAll" resultMap="productMap">
+        SELECT <include refid="columns"/>
+        FROM product
+        ORDER BY id
+    </select>
+
+    <!-- 热点商品：按浏览量降序取前 N 条（启动预热用） -->
+    <select id="selectHotProducts" resultMap="productMap">
+        SELECT <include refid="columns"/>
+        FROM product
+        WHERE status = 1
+        ORDER BY view_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 【v3】分页查询：LIMIT offset, size；keyword 为空时查全部 -->
+    <select id="selectPage" resultMap="productMap">
+        SELECT <include refid="columns"/>
+        FROM product
+        <where>
+            <if test="keyword != null and keyword != ''">
+                name LIKE CONCAT('%', #{keyword}, '%')
+            </if>
+        </where>
+        ORDER BY id
+        LIMIT #{offset}, #{size}
+    </select>
+
+    <!-- 【v3】按关键字统计总数 -->
+    <select id="countByKeyword" resultType="long">
+        SELECT COUNT(*)
+        FROM product
+        <where>
+            <if test="keyword != null and keyword != ''">
+                name LIKE CONCAT('%', #{keyword}, '%')
+            </if>
+        </where>
+    </select>
+
+    <!-- 新增商品 -->
+    <!-- useGeneratedKeys + keyProperty：插入后自动将自增ID回填到 product 对象 -->
+    <insert id="insert" parameterType="com.jyu.cache.entity.Product"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO product (name, category_id, price, stock, description, status, view_count)
+        VALUES (#{name}, #{categoryId}, #{price}, #{stock}, #{description}, #{status}, #{viewCount})
+    </insert>
+
+    <!-- 更新商品（全字段更新） -->
+    <update id="updateById" parameterType="com.jyu.cache.entity.Product">
+        UPDATE product
+        SET name        = #{name},
+            category_id = #{categoryId},
+            price       = #{price},
+            stock       = #{stock},
+            description = #{description},
+            status      = #{status}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 删除商品 -->
+    <delete id="deleteById">
+        DELETE FROM product WHERE id = #{id}
+    </delete>
+
+    <!-- 浏览量+1（每次查询商品详情时调用，模拟热点数据被访问） -->
+    <update id="incrementViewCount">
+        UPDATE product SET view_count = view_count + 1 WHERE id = #{id}
+    </update>
+
+    <!-- 统计商品总数 -->
+    <select id="countAll" resultType="int">
+        SELECT COUNT(*) FROM product
+    </select>
+
+    <!-- 【订单】原子扣减库存：WHERE 带库存条件，返回影响行数（0=库存不足，扣减失败） -->
+    <!-- 防超卖关键：数据库行锁保证并发安全，不用"先查再改" -->
+    <update id="decreaseStock">
+        UPDATE product
+        SET stock = stock - #{quantity}
+        WHERE id = #{id} AND stock &gt;= #{quantity}
+    </update>
+
+    <!-- 【订单】回补库存：取消/退款/退货审核通过后调用 -->
+    <update id="increaseStock">
+        UPDATE product
+        SET stock = stock + #{quantity}
+        WHERE id = #{id}
+    </update>
+</mapper>

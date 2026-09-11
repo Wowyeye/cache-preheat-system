@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>耗时对比 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <script src="vendor/echarts/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            点击「运行对比实验」，程序会对同一批商品分别发起 <b>N 次缓存请求</b>（命中缓存）和
+            <b>N 次回源请求</b>（先清缓存强制回源数据库），统计两组平均耗时并可视化。
+        </div>
+
+        <!-- 实验控制 -->
+        <div class="panel">
+            <div style="display:flex; gap:12px; align-items:center;">
+                <el-button type="primary" :loading="running" @click="runExperiment">运行对比实验</el-button>
+                <el-button @click="clearStats" :disabled="running">重置统计数据</el-button>
+                <span class="muted">实验会交替清缓存/写缓存，数据为真实测量值</span>
+            </div>
+        </div>
+
+        <!-- 结果卡片 -->
+        <div class="stats-row" v-if="result">
+            <div class="stat-card">
+                <div class="label">缓存路径平均耗时</div>
+                <div class="value good">{{ result.cacheAvgMs }} ms</div>
+                <div class="extra">{{ result.cacheCount }} 次请求</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">回源数据库平均耗时</div>
+                <div class="value bad">{{ result.dbAvgMs }} ms</div>
+                <div class="extra">{{ result.dbCount }} 次请求</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">缓存加速倍数</div>
+                <div class="value">{{ result.speedUp }} 倍</div>
+                <div class="extra">dbAvg / cacheAvg</div>
+            </div>
+        </div>
+
+        <!-- 图表 -->
+        <div class="chart-row">
+            <div class="panel">
+                <div class="panel-title">平均耗时对比（毫秒）</div>
+                <div id="chartAvg" class="chart"></div>
+            </div>
+            <div class="panel">
+                <div class="panel-title">单次请求耗时序列</div>
+                <div id="chartSeries" class="chart"></div>
+            </div>
+        </div>
+
+        <!-- 全局统计（来自后端累计值） -->
+        <div class="panel">
+            <div class="panel-title">后端累计统计</div>
+            <el-table :data="[globalStats]" border>
+                <el-table-column prop="totalRequests" label="总请求数" width="120"></el-table-column>
+                <el-table-column prop="hitCount" label="缓存命中" width="120"></el-table-column>
+                <el-table-column prop="missCount" label="缓存未命中" width="120"></el-table-column>
+                <el-table-column prop="hitRate" label="命中率" width="120"></el-table-column>
+                <el-table-column prop="cacheAvgMs" label="缓存路径平均耗时(ms)" width="180"></el-table-column>
+                <el-table-column prop="dbAvgMs" label="回源路径平均耗时(ms)" width="180"></el-table-column>
+            </el-table>
+        </div>
+    </div>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, onMounted } = Vue;
+
+    const app = createApp({
+        setup() {
+            const state = reactive({
+                running: false, result: null,
+                globalStats: { totalRequests: 0, hitCount: 0, missCount: 0, hitRate: '--', cacheAvgMs: 0, dbAvgMs: 0 }
+            });
+            let chartAvg = null, chartSeries = null;
+
+            /** 运行对比实验：清缓存后请求（回源）→ 写回缓存后请求（命中），各 N 次 */
+            async function runExperiment() {
+                state.running = true;
+                try {
+                    const testIds = [1, 2, 3, 4, 5];
+                    const N = 5;  // 每条商品每轮请求次数
+                    const dbSamples = [], cacheSamples = [];
+
+                    // 第一阶段：清空缓存后逐个请求 → 全部回源数据库
+                    await apiSend('/api/product/cache/all', 'DELETE');
+                    for (const id of testIds) {
+                        for (let i = 0; i < N; i++) {
+                            // 同一商品连续请求只有第一次回源，后续命中；
+                            // 所以每轮都先删该商品缓存再请求
+                            await apiSend('/api/product/cache/' + id, 'DELETE');
+                            const t0 = performance.now();
+                            await apiGet('/api/product/' + id);
+                            dbSamples.push(performance.now() - t0);
+                        }
+                    }
+
+                    // 第二阶段：缓存已全部写回，逐个请求 → 全部命中缓存
+                    for (const id of testIds) {
+                        for (let i = 0; i < N; i++) {
+                            const t0 = performance.now();
+                            await apiGet('/api/product/' + id);
+                            cacheSamples.push(performance.now() - t0);
+                        }
+                    }
+
+                    const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+                    const dbAvg = avg(dbSamples), cacheAvg = avg(cacheSamples);
+                    state.result = {
+                        cacheAvgMs: cacheAvg.toFixed(2),
+                        dbAvgMs: dbAvg.toFixed(2),
+                        speedUp: (dbAvg / cacheAvg).toFixed(1),
+                        cacheCount: cacheSamples.length,
+                        dbCount: dbSamples.length,
+                        cacheSamples, dbSamples
+                    };
+                    renderCharts();
+                    showToast('对比实验完成：缓存平均 ' + state.result.cacheAvgMs + 'ms vs 数据库 ' + state.result.dbAvgMs + 'ms', 'success');
+                } catch (e) {
+                    showToast('实验失败：' + e.message, 'error');
+                }
+                state.running = false;
+            }
+
+            /** 重置后端累计统计 */
+            function clearStats() {
+                // 后端暂无重置接口，这里仅重置前端实验结果
+                state.result = null;
+                showToast('已重置实验数据（后端累计统计继续累计）', 'info');
+            }
+
+            async function loadGlobal() {
+                try {
+                    const data = await apiGet('/api/product/cache/stats');
+                    Object.assign(state.globalStats, data);
+                } catch (e) { /* 静默 */ }
+            }
+
+            function renderCharts() {
+                // 平均耗时柱状图
+                if (!chartAvg) chartAvg = echarts.init(document.getElementById('chartAvg'));
+                chartAvg.setOption({
+                    tooltip: { trigger: 'axis' },
+                    grid: { left: 60, right: 30, top: 40, bottom: 40 },
+                    xAxis: { type: 'category', data: ['缓存命中', '回源数据库'] },
+                    yAxis: { type: 'value', name: 'ms' },
+                    series: [{
+                        type: 'bar', barWidth: 70,
+                        label: { show: true, position: 'top', formatter: '{c} ms' },
+                        data: [
+                            { value: Number(state.result.cacheAvgMs), itemStyle: { color: '#67c23a' } },
+                            { value: Number(state.result.dbAvgMs), itemStyle: { color: '#f56c6c' } }
+                        ]
+                    }]
+                });
+
+                // 耗时序列散点图
+                if (!chartSeries) chartSeries = echarts.init(document.getElementById('chartSeries'));
+                const cachePoints = state.result.cacheSamples.map((v, i) => [i, v]);
+                const dbPoints = state.result.dbSamples.map((v, i) => [i, v]);
+                chartSeries.setOption({
+                    tooltip: { trigger: 'item', formatter: p => p.seriesName + ' 第' + (p.data[0] + 1) + '次: ' + p.data[1].toFixed(2) + ' ms' },
+                    legend: { top: 0 },
+                    grid: { left: 60, right: 30, top: 40, bottom: 40 },
+                    xAxis: { type: 'value', name: '请求序号' },
+                    yAxis: { type: 'value', name: 'ms' },
+                    series: [
+                        { name: '缓存命中', type: 'scatter', symbolSize: 8, itemStyle: { color: '#67c23a' }, data: cachePoints },
+                        { name: '回源数据库', type: 'scatter', symbolSize: 8, itemStyle: { color: '#f56c6c' }, data: dbPoints }
+                    ]
+                });
+            }
+
+            onMounted(() => {
+                renderHeader('compare');
+                loadGlobal();
+                setInterval(loadGlobal, 5000);
+            });
+
+            return {
+                get running() { return state.running; },
+                get result() { return state.result; },
+                get globalStats() { return state.globalStats; },
+                runExperiment, clearStats
+            };
+        }
+    });
+    app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+    app.mount('#app');
+</script>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 / 注册 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <style>
+        .login-wrapper {
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .login-box {
+            background: #fff; border-radius: 12px; padding: 40px;
+            width: 420px; box-shadow: 0 8px 32px rgba(0,0,0,.2);
+        }
+        .login-title { text-align: center; font-size: 20px; font-weight: bold; color: #303133; margin-bottom: 8px; }
+        .login-sub   { text-align: center; font-size: 13px; color: #909399; margin-bottom: 28px; }
+        .login-tabs { display: flex; margin-bottom: 24px; border-bottom: 2px solid #f0f0f0; }
+        .login-tabs .tab {
+            flex: 1; text-align: center; padding: 10px 0; cursor: pointer;
+            font-size: 15px; color: #909399; border-bottom: 2px solid transparent; margin-bottom: -2px;
+            transition: all .2s;
+        }
+        .login-tabs .tab.active { color: #5a4fcf; border-bottom-color: #5a4fcf; font-weight: bold; }
+        .login-box .el-form-item { margin-bottom: 22px; }
+        .login-box .el-button { width: 100%; }
+        .login-tip { text-align: center; margin-top: 16px; font-size: 12px; color: #c0c4cc; line-height: 1.8; }
+    </style>
+</head>
+<body>
+<div class="login-wrapper">
+    <div class="login-box">
+        <div class="login-title">热点数据缓存预热与一致性保障系统</div>
+        <div class="login-sub">v2.0 · 用户中心</div>
+
+        <div class="login-tabs">
+            <div :class="['tab', mode==='login' ? 'active' : '']" @click="mode='login'">登录</div>
+            <div :class="['tab', mode==='register' ? 'active' : '']" @click="mode='register'">注册</div>
+        </div>
+
+        <!-- 登录表单 -->
+        <el-form v-if="mode==='login'" :model="loginForm" label-width="0" @submit.prevent>
+            <el-form-item>
+                <el-input v-model="loginForm.username" placeholder="用户名" prefix-icon="User" size="large" />
+            </el-form-item>
+            <el-form-item>
+                <el-input v-model="loginForm.password" type="password" placeholder="密码" prefix-icon="Lock" size="large" show-password />
+            </el-form-item>
+            <el-button type="primary" size="large" :loading="loading" @click="doLogin">登 录</el-button>
+        </el-form>
+
+        <!-- 注册表单 -->
+        <el-form v-else :model="regForm" label-width="0" @submit.prevent>
+            <el-form-item>
+                <el-input v-model="regForm.username" placeholder="用户名（3-20位）" prefix-icon="User" size="large" />
+            </el-form-item>
+            <el-form-item>
+                <el-input v-model="regForm.nickname" placeholder="昵称（选填）" prefix-icon="Star" size="large" />
+            </el-form-item>
+            <el-form-item>
+                <el-input v-model="regForm.password" type="password" placeholder="密码（6-20位）" prefix-icon="Lock" size="large" show-password />
+            </el-form-item>
+            <el-button type="primary" size="large" :loading="loading" @click="doRegister">注 册</el-button>
+        </el-form>
+
+        <div class="login-tip">
+            演示账号：admin / admin123（管理员）<br>
+            演示账号：user1 / 123456（普通用户）
+        </div>
+    </div>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive } = Vue;
+
+    createApp({
+        setup() {
+            const state = reactive({
+                mode: 'login',
+                loading: false,
+                loginForm: { username: '', password: '' },
+                regForm: { username: '', nickname: '', password: '' }
+            });
+
+            async function doLogin() {
+                if (!state.loginForm.username || !state.loginForm.password) {
+                    ElementPlus.ElMessage.warning('请输入用户名和密码');
+                    return;
+                }
+                state.loading = true;
+                try {
+                    const data = await apiSend('/api/auth/login', 'POST', {
+                        username: state.loginForm.username,
+                        password: state.loginForm.password
+                    });
+                    saveAuth(data.token, data.user);
+                    ElementPlus.ElMessage.success('登录成功');
+                    setTimeout(() => {
+                        location.href = data.user.role === 'ADMIN' ? 'dashboard.html' : 'mall.html';
+                    }, 600);
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message);
+                }
+                state.loading = false;
+            }
+
+            async function doRegister() {
+                if (!state.regForm.username || !state.regForm.password) {
+                    ElementPlus.ElMessage.warning('请填写用户名和密码');
+                    return;
+                }
+                if (state.regForm.username.length < 3) {
+                    ElementPlus.ElMessage.warning('用户名至少 3 位');
+                    return;
+                }
+                if (state.regForm.password.length < 6) {
+                    ElementPlus.ElMessage.warning('密码至少 6 位');
+                    return;
+                }
+                state.loading = true;
+                try {
+                    await apiSend('/api/auth/register', 'POST', {
+                        username: state.regForm.username,
+                        password: state.regForm.password,
+                        nickname: state.regForm.nickname || state.regForm.username
+                    });
+                    ElementPlus.ElMessage.success('注册成功，请登录');
+                    state.mode = 'login';
+                    state.loginForm.username = state.regForm.username;
+                    state.loginForm.password = '';
+                } catch (e) {
+                    ElementPlus.ElMessage.error(e.message);
+                }
+                state.loading = false;
+            }
+
+            return {
+                get mode() { return state.mode; }, set mode(v) { state.mode = v; },
+                get loginForm() { return state.loginForm; },
+                get regForm() { return state.regForm; },
+                get loading() { return state.loading; },
+                doLogin, doRegister
+            };
+        }
+    }).use(ElementPlus, { locale: ElementPlusLocaleZhCn }).mount('body > div');
+</script>
+</body>
+</html>

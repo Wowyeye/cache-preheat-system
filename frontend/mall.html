@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>商城 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <style>
+        .product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; }
+        .product-card {
+            background: #fff; border-radius: 10px; overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,.08); transition: box-shadow .2s;
+        }
+        .product-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+        .product-card .img-box {
+            height: 180px; background: linear-gradient(135deg, #f0f2f5, #e6e8ed);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .product-card .img-box .placeholder { font-size: 40px; color: #c0c4cc; }
+        .product-card .info { padding: 14px 16px; }
+        .product-card .name { font-size: 15px; font-weight: bold; margin-bottom: 6px; line-height: 1.4; }
+        .product-card .desc { font-size: 12px; color: #909399; margin-bottom: 8px; height: 18px; overflow: hidden; }
+        .product-card .price-row { display: flex; align-items: center; justify-content: space-between; }
+        .product-card .price { font-size: 20px; color: #f56c6c; font-weight: bold; }
+        .product-card .stock { font-size: 12px; color: #909399; }
+        .product-card .actions { padding: 0 16px 14px; }
+        .cart-fab {
+            position: fixed; right: 30px; bottom: 30px; z-index: 100;
+        }
+        .cart-badge { margin-left: 4px; }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            <b>真实用户浏览产生热度</b>：每次浏览商品详情，系统自动在 Redis ZSet 中 +1 热度分。
+            登录后可下单购买，下单/退款/退货的库存变更自动触发<b>延迟双删</b>保障缓存一致性。
+        </div>
+
+        <!-- 搜索栏 -->
+        <div class="panel" style="display:flex; gap:10px; align-items:center;">
+            <el-input v-model="keyword" placeholder="搜索商品名称" clearable style="width:280px"></el-input>
+            <el-select v-model="selectedCategory" placeholder="全部分类" clearable style="width:160px">
+                <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id"></el-option>
+            </el-select>
+            <span class="muted" style="margin-left:auto">共 {{ filtered.length }} 件商品</span>
+        </div>
+
+        <!-- 商品卡片网格 -->
+        <div class="product-grid">
+            <div v-for="p in filtered" :key="p.id" class="product-card">
+                <div class="img-box" @click="viewDetail(p)">
+                    <span class="placeholder">📦</span>
+                </div>
+                <div class="info">
+                    <div class="name" @click="viewDetail(p)" style="cursor:pointer">{{ p.name }}</div>
+                    <div class="desc">{{ p.description || '' }}</div>
+                    <div class="price-row">
+                        <span class="price">¥{{ p.price }}</span>
+                        <span class="stock">库存 {{ p.stock }}</span>
+                    </div>
+                </div>
+                <div class="actions">
+                    <el-button size="small" type="primary" @click="addToCart(p)" :disabled="p.stock <= 0">
+                        {{ p.stock > 0 ? '加入购物车' : '已售罄' }}
+                    </el-button>
+                    <el-button size="small" plain @click="viewDetail(p)">详情</el-button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 购物车悬浮按钮 -->
+    <div class="cart-fab">
+        <el-badge :value="cartCount" :hidden="cartCount === 0" class="cart-badge">
+            <el-button type="primary" size="large" circle @click="cartVisible = true">
+                <el-icon size="20"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 18c-1.1 0-1.99.9-1.99 2S5.9 22 7 22s2-.9 2-2-.9-2-2-2zM1 2v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96 0 1.1.9 2 2 2h12v-2H7.42c-.14 0-.25-.11-.25-.25l.03-.12.9-1.63h7.45c.75 0 1.41-.41 1.75-1.03l3.58-6.49A1.003 1.003 0 0 0 20.7 4H5.21l-.94-2H1zm16 16c-1.1 0-1.99.9-1.99 2s.89 2 1.99 2 2-.9 2-2-.9-2-2-2z"/></svg></el-icon>
+            </el-button>
+        </el-badge>
+    </div>
+
+    <!-- 购物车弹窗 -->
+    <el-dialog v-model="cartVisible" title="购物车" width="560px">
+        <el-table :data="cart" border>
+            <el-table-column prop="name" label="商品" min-width="160"></el-table-column>
+            <el-table-column prop="price" label="单价" width="100">
+                <template #default="scope">¥{{ scope.row.price }}</template>
+            </el-table-column>
+            <el-table-column label="数量" width="140">
+                <template #default="scope">
+                    <el-input-number v-model="scope.row.qty" :min="1" :max="scope.row.stock" size="small" @change="onCartQtyChange(scope.row)"></el-input-number>
+                </template>
+            </el-table-column>
+            <el-table-column label="小计" width="100">
+                <template #default="scope">¥{{ (scope.row.price * scope.row.qty).toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="70">
+                <template #default="scope">
+                    <el-button size="small" type="danger" plain @click="removeFromCart(scope.$index)">移除</el-button>
+                </template>
+            </el-table-column>
+        </el-table>
+        <div style="text-align:right; margin-top:16px;">
+            <span style="font-size:16px; font-weight:bold; margin-right:16px;">合计：¥{{ cartTotal }}</span>
+            <el-button type="primary" :loading="submitting" @click="submitOrder" :disabled="cart.length === 0">提交订单</el-button>
+        </div>
+    </el-dialog>
+
+    <!-- 支付弹窗 -->
+    <el-dialog v-model="payDialogVisible" :title="'订单 ' + (currentOrder?.orderNo || '')" width="420px">
+        <div style="text-align:center; padding:20px 0;">
+            <div style="font-size:14px; color:#909399; margin-bottom:8px;">待支付金额</div>
+            <div style="font-size:32px; color:#f56c6c; font-weight:bold; margin-bottom:24px;">¥{{ currentOrder?.totalAmount || 0 }}</div>
+            <el-button type="primary" size="large" style="width:100%;" :loading="paying" @click="confirmPay">确认支付</el-button>
+        </div>
+    </el-dialog>
+
+    <!-- 商品详情弹窗 -->
+    <el-dialog v-model="detailVisible" title="商品详情" width="480px">
+        <div v-if="currentProduct" style="padding:0 8px;">
+            <div style="display:flex; align-items:center; gap:16px; margin-bottom:16px;">
+                <div style="width:80px; height:80px; background:#f0f2f5; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:32px;">📦</div>
+                <div>
+                    <div style="font-size:16px; font-weight:bold;">{{ currentProduct.name }}</div>
+                    <div style="font-size:13px; color:#909399; margin-top:4px;">{{ currentProduct.description || '暂无描述' }}</div>
+                </div>
+            </div>
+            <el-descriptions :column="2" border>
+                <el-descriptions-item label="价格">¥{{ currentProduct.price }}</el-descriptions-item>
+                <el-descriptions-item label="库存">{{ currentProduct.stock }}</el-descriptions-item>
+                <el-descriptions-item label="浏览量">{{ currentProduct.viewCount }}</el-descriptions-item>
+                <el-descriptions-item label="状态">{{ currentProduct.status === 1 ? '上架' : '下架' }}</el-descriptions-item>
+            </el-descriptions>
+            <div style="margin-top:16px; text-align:right;">
+                <el-button type="primary" @click="addToCart(currentProduct)" :disabled="currentProduct.stock <= 0">
+                    {{ currentProduct.stock > 0 ? '加入购物车' : '已售罄' }}
+                </el-button>
+            </div>
+        </div>
+    </el-dialog>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, computed, onMounted } = Vue;
+
+    createApp({
+        setup() {
+            const state = reactive({
+                products: [], categories: [],
+                keyword: '', selectedCategory: null,
+                cart: [],
+                cartVisible: false,
+                detailVisible: false,
+                currentProduct: null,
+                payDialogVisible: false,
+                currentOrder: null,
+                submitting: false,
+                paying: false
+            });
+
+            async function loadProducts() {
+                try {
+                    state.products = await apiGet('/api/product/list');
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            async function loadCategories() {
+                try {
+                    state.categories = await apiGet('/api/category/list');
+                } catch (e) { /* 静默 */ }
+            }
+
+            const filtered = computed(() => {
+                let list = state.products;
+                const kw = (state.keyword || '').trim();
+                if (kw) list = list.filter(p => p.name.includes(kw));
+                if (state.selectedCategory) list = list.filter(p => p.categoryId === state.selectedCategory);
+                return list.filter(p => p.status === 1);
+            });
+
+            const cartCount = computed(() => state.cart.reduce((s, i) => s + i.qty, 0));
+            const cartTotal = computed(() =>
+                state.cart.reduce((s, i) => s + i.price * i.qty, 0).toFixed(2)
+            );
+
+            function viewDetail(p) {
+                // 走缓存接口 getById（热度+1），再用返回值填充弹窗
+                apiGet('/api/product/' + p.id).then(detail => {
+                    state.currentProduct = detail;
+                    state.detailVisible = true;
+                    loadProducts();
+                }).catch(e => showToast(e.message, 'error'));
+            }
+
+            function addToCart(p) {
+                const existing = state.cart.find(i => i.id === p.id);
+                if (existing) {
+                    if (existing.qty >= p.stock) {
+                        showToast('已达库存上限', 'warning');
+                        return;
+                    }
+                    existing.qty++;
+                } else {
+                    state.cart.push({ id: p.id, name: p.name, price: p.price, stock: p.stock, qty: 1 });
+                }
+                showToast(`「${p.name}」已加入购物车`, 'success');
+            }
+
+            function removeFromCart(idx) {
+                state.cart.splice(idx, 1);
+            }
+
+            function onCartQtyChange(row) {
+                if (row.qty > row.stock) row.qty = row.stock;
+                if (row.qty < 1) row.qty = 1;
+            }
+
+            async function submitOrder() {
+                if (!isLoggedIn()) {
+                    showToast('请先登录', 'warning');
+                    setTimeout(() => location.href = 'login.html', 800);
+                    return;
+                }
+                state.submitting = true;
+                try {
+                    const items = state.cart.map(i => ({ productId: i.id, quantity: i.qty }));
+                    const order = await apiSend('/api/order/create', 'POST', { items, remark: '' });
+                    state.cart = [];
+                    state.cartVisible = false;
+                    state.currentOrder = order;
+                    state.payDialogVisible = true;
+                    showToast('下单成功，请支付', 'success');
+                    loadProducts();
+                } catch (e) { showToast(e.message, 'error'); }
+                state.submitting = false;
+            }
+
+            async function confirmPay() {
+                state.paying = true;
+                try {
+                    await apiSend('/api/order/' + state.currentOrder.id + '/pay', 'POST');
+                    showToast('支付成功！可在「我的订单」中查看', 'success');
+                    state.payDialogVisible = false;
+                    state.currentOrder = null;
+                    loadProducts();
+                } catch (e) { showToast(e.message, 'error'); }
+                state.paying = false;
+            }
+
+            onMounted(() => {
+                renderHeader('mall');
+                loadProducts();
+                loadCategories();
+            });
+
+            return {
+                filtered, cartCount, cartTotal,
+                get keyword() { return state.keyword; }, set keyword(v) { state.keyword = v; },
+                get selectedCategory() { return state.selectedCategory; }, set selectedCategory(v) { state.selectedCategory = v; },
+                get categories() { return state.categories; },
+                get cart() { return state.cart; },
+                get cartVisible() { return state.cartVisible; }, set cartVisible(v) { state.cartVisible = v; },
+                get detailVisible() { return state.detailVisible; }, set detailVisible(v) { state.detailVisible = v; },
+                get currentProduct() { return state.currentProduct; },
+                get payDialogVisible() { return state.payDialogVisible; }, set payDialogVisible(v) { state.payDialogVisible = v; },
+                get currentOrder() { return state.currentOrder; },
+                get submitting() { return state.submitting; },
+                get paying() { return state.paying; },
+                viewDetail, addToCart, removeFromCart, onCartQtyChange, submitOrder, confirmPay
+            };
+        }
+    }).use(ElementPlus, { locale: ElementPlusLocaleZhCn }).mount('#app');
+</script>
+</body>
+</html>

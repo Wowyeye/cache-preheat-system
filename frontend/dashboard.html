@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>监控大盘 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <!-- Element Plus（按钮/表格组件） -->
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <!-- ECharts 图表库 -->
+    <script src="vendor/echarts/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <!-- 页头导航 -->
+    <div id="header"></div>
+
+    <div class="container">
+        <!-- 顶部统计卡片 -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="label">缓存命中率</div>
+                <div class="value" :class="stats.hitRateNum >= 80 ? 'good' : (stats.hitRateNum < 50 ? 'bad' : '')">{{ stats.hitRate }}</div>
+                <div class="extra">命中 {{ stats.hitCount }} 次 / 未命中 {{ stats.missCount }} 次</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">缓存 key 数量</div>
+                <div class="value">{{ stats.cacheKeyCount }}</div>
+                <div class="extra">Redis 中商品缓存条数</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">商品总数</div>
+                <div class="value">{{ stats.productTotal }}</div>
+                <div class="extra">MySQL product 表</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">自动预热轮次</div>
+                <div class="value">{{ autoStats.autoPreheatRounds }}</div>
+                <div class="extra">最近一轮：{{ autoStats.lastPreheatTime }}（{{ autoStats.lastPreheatCount }} 条）</div>
+            </div>
+        </div>
+
+        <!-- 图表区：命中率环形图 + 请求分布柱状图 -->
+        <div class="chart-row">
+            <div class="panel">
+                <div class="panel-title">缓存命中 / 未命中分布</div>
+                <div id="chartHit" class="chart"></div>
+            </div>
+            <div class="panel">
+                <div class="title panel-title">请求路径分布（走缓存 vs 回源数据库）</div>
+                <div id="chartPath" class="chart"></div>
+            </div>
+        </div>
+
+        <!-- 操作区 -->
+        <div class="panel">
+            <div class="panel-title">
+                <span>缓存运维操作</span>
+                <span class="tools">
+                    <el-button size="small" type="primary" @click="preheat">手动预热</el-button>
+                    <el-button size="small" type="warning" @click="clearAll">清空全部缓存</el-button>
+                </span>
+            </div>
+            <div class="tip-box">
+                监控大盘每 5 秒自动刷新统计数据。自动热点预热每 60 秒执行一轮：从 Redis ZSet 热度排行榜取 TopN 商品，
+                自动加载到缓存——这就是「热点自动发现 → 缓存自动跟上」的闭环。
+            </div>
+            <span class="muted" id="lastRefreshText">最近刷新：--</span>
+        </div>
+    </div>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, onMounted } = Vue;
+
+    const app = createApp({
+        setup() {
+            const stats = reactive({
+                hitRate: '--', hitRateNum: 0, hitCount: 0, missCount: 0,
+                totalRequests: 0, cacheKeyCount: 0, productTotal: 0,
+                cacheAvgMs: 0, dbAvgMs: 0, cachePathCount: 0, dbPathCount: 0
+            });
+            const autoStats = reactive({ lastPreheatCount: 0, lastPreheatTime: '未执行', autoPreheatRounds: 0 });
+            const lastRefresh = { text: '' };
+            let chartHit = null, chartPath = null;
+
+            // 简单容器对象（仅记录最近刷新时间，手动更新 DOM 文本）
+
+            async function loadStats() {
+                try {
+                    const data = await apiGet('/api/product/cache/stats');
+                    Object.assign(stats, data);
+                    // "85.71%" -> 85.71，便于模板里判断颜色
+                    stats.hitRateNum = parseFloat(stats.hitRate);
+                    renderCharts();
+                    lastRefresh.text = new Date().toLocaleTimeString();
+                    const el = document.getElementById('lastRefreshText');
+                    if (el) el.textContent = '最近刷新：' + lastRefresh.text;
+                } catch (e) {
+                    console.error('加载统计失败', e);
+                }
+            }
+
+            async function loadAutoStats() {
+                try {
+                    const data = await apiGet('/api/hotspot/auto-stats');
+                    Object.assign(autoStats, data);
+                } catch (e) {
+                    console.error('加载自动预热状态失败', e);
+                }
+            }
+
+            function renderCharts() {
+                // 环形图：命中 / 未命中
+                if (!chartHit) chartHit = echarts.init(document.getElementById('chartHit'));
+                chartHit.setOption({
+                    tooltip: { trigger: 'item' },
+                    legend: { bottom: 0 },
+                    series: [{
+                        type: 'pie', radius: ['45%', '70%'],
+                        label: { show: true, formatter: '{b}: {c}' },
+                        data: [
+                            { value: stats.hitCount, name: '缓存命中', itemStyle: { color: '#67c23a' } },
+                            { value: stats.missCount, name: '缓存未命中', itemStyle: { color: '#f56c6c' } }
+                        ]
+                    }]
+                });
+
+                // 柱状图：请求路径分布
+                if (!chartPath) chartPath = echarts.init(document.getElementById('chartPath'));
+                chartPath.setOption({
+                    tooltip: { trigger: 'axis' },
+                    grid: { left: 60, right: 30, top: 40, bottom: 40 },
+                    xAxis: { type: 'category', data: ['走缓存', '回源数据库'] },
+                    yAxis: { type: 'value' },
+                    series: [{
+                        type: 'bar', barWidth: 60,
+                        label: { show: true, position: 'top' },
+                        data: [
+                            { value: stats.cachePathCount, itemStyle: { color: '#667eea' } },
+                            { value: stats.dbPathCount, itemStyle: { color: '#e6a23c' } }
+                        ]
+                    }]
+                });
+            }
+
+            async function preheat() {
+                try {
+                    const msg = await apiSend('/api/product/preheat', 'POST');
+                    showToast(typeof msg === 'string' ? msg : '预热完成', 'success');
+                    loadStats();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            async function clearAll() {
+                try {
+                    const msg = await apiSend('/api/product/cache/all', 'DELETE');
+                    showToast(typeof msg === 'string' ? msg : '已清空', 'success');
+                    loadStats();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            onMounted(() => {
+                renderHeader('dashboard');
+                loadStats();
+                loadAutoStats();
+                setInterval(loadStats, 5000);
+                setInterval(loadAutoStats, 10000);
+            });
+
+            return { stats, autoStats, preheat, clearAll };
+        }
+    });
+    app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+    app.mount('#app');
+</script>
+</body>
+</html>

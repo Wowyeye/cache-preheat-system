@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.jyu.cache.mapper.OrderMapper">
+
+    <resultMap id="orderMap" type="com.jyu.cache.entity.Order">
+        <id property="id" column="id"/>
+        <result property="orderNo" column="order_no"/>
+        <result property="userId" column="user_id"/>
+        <result property="totalAmount" column="total_amount"/>
+        <result property="status" column="status"/>
+        <result property="remark" column="remark"/>
+        <result property="createTime" column="create_time"/>
+        <result property="payTime" column="pay_time"/>
+        <result property="finishTime" column="finish_time"/>
+        <!-- 订单明细：一对多 -->
+        <collection property="items" ofType="com.jyu.cache.entity.OrderItem">
+            <id property="id" column="item_id"/>
+            <result property="orderId" column="item_order_id"/>
+            <result property="productId" column="product_id"/>
+            <result property="productName" column="product_name"/>
+            <result property="productPrice" column="product_price"/>
+            <result property="quantity" column="quantity"/>
+            <result property="subtotal" column="subtotal"/>
+        </collection>
+    </resultMap>
+
+    <sql id="orderColumns">
+        o.id, o.order_no, o.user_id, o.total_amount, o.status, o.remark,
+        o.create_time, o.pay_time, o.finish_time
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO orders (order_no, user_id, total_amount, status, remark, create_time)
+        VALUES (#{orderNo}, #{userId}, #{totalAmount}, #{status}, #{remark}, NOW())
+    </insert>
+
+    <insert id="insertItem" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO order_item (order_id, product_id, product_name, product_price, quantity, subtotal)
+        VALUES (#{orderId}, #{productId}, #{productName}, #{productPrice}, #{quantity}, #{subtotal})
+    </insert>
+
+    <select id="selectById" resultMap="orderMap">
+        SELECT o.*,
+               i.id AS item_id, i.order_id AS item_order_id, i.product_id, i.product_name,
+               i.product_price, i.quantity, i.subtotal
+        FROM orders o
+        LEFT JOIN order_item i ON o.id = i.order_id
+        WHERE o.id = #{id}
+    </select>
+
+    <select id="selectByOrderNo" resultMap="orderMap">
+        SELECT o.*,
+               i.id AS item_id, i.order_id AS item_order_id, i.product_id, i.product_name,
+               i.product_price, i.quantity, i.subtotal
+        FROM orders o
+        LEFT JOIN order_item i ON o.id = i.order_id
+        WHERE o.order_no = #{orderNo}
+    </select>
+
+    <select id="selectByUserId" resultMap="orderMap">
+        SELECT o.*,
+               i.id AS item_id, i.order_id AS item_order_id, i.product_id, i.product_name,
+               i.product_price, i.quantity, i.subtotal
+        FROM orders o
+        LEFT JOIN order_item i ON o.id = i.order_id
+        WHERE o.user_id = #{userId}
+        ORDER BY o.create_time DESC
+    </select>
+
+    <select id="selectAll" resultMap="orderMap">
+        SELECT o.*,
+               i.id AS item_id, i.order_id AS item_order_id, i.product_id, i.product_name,
+               i.product_price, i.quantity, i.subtotal
+        FROM orders o
+        LEFT JOIN order_item i ON o.id = i.order_id
+        ORDER BY o.create_time DESC
+    </select>
+
+    <update id="updateStatus">
+        UPDATE orders
+        <set>
+            <if test="status != null">status = #{status},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="payTime != null">pay_time = #{payTime},</if>
+            <if test="finishTime != null">finish_time = #{finishTime},</if>
+        </set>
+        WHERE id = #{id}
+    </update>
+
+    <!-- 【v3】状态机式更新：仅当当前状态 = expectedStatus 才更新（并发安全，超时取消与手动取消竞争时只有一个赢） -->
+    <update id="updateStatusIf">
+        UPDATE orders
+        SET status      = #{newStatus},
+            remark      = #{remark},
+            finish_time = #{finishTime}
+        WHERE id = #{id}
+          AND status = #{expectedStatus}
+    </update>
+
+    <!-- 【v3】超时未支付订单：待支付 且 创建时间早于 deadline -->
+    <select id="selectTimeoutPending" resultMap="orderMap">
+        SELECT <include refid="orderColumns"/>
+        FROM orders o
+        WHERE o.status = 'PENDING_PAYMENT'
+          AND o.create_time &lt; #{deadline}
+        ORDER BY o.create_time
+        LIMIT #{limit}
+    </select>
+
+    <select id="selectItemsByOrderId" resultType="com.jyu.cache.entity.OrderItem">
+        SELECT id, order_id AS orderId, product_id AS productId, product_name AS productName,
+               product_price AS productPrice, quantity, subtotal
+        FROM order_item
+        WHERE order_id = #{orderId}
+    </select>
+
+</mapper>

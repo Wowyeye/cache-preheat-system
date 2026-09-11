@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>热点排行 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+    <script src="vendor/echarts/echarts.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            <b>这就是本系统的创新点「自动热点识别」</b>：每次商品被访问，都会在 Redis ZSet（有序集合）里 +1 分；
+            定时任务每 60 秒取热度 TopN 自动预热进缓存。相比传统「按历史浏览量静态预热」，它能捕捉<b>正在发生</b>的热点——
+            新商品爆火后 60 秒内缓存就会跟上，无需重启系统。
+        </div>
+
+        <!-- 自动预热状态卡片 -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="label">自动预热轮次</div>
+                <div class="value">{{ autoStats.autoPreheatRounds }}</div>
+                <div class="extra">每 60 秒一轮</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">最近一轮预热数量</div>
+                <div class="value">{{ autoStats.lastPreheatCount }}</div>
+                <div class="extra">热度 TopN 商品</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">最近一轮执行时间</div>
+                <div class="value" style="font-size:18px">{{ autoStats.lastPreheatTime }}</div>
+                <div class="extra">Spring @Scheduled 驱动</div>
+            </div>
+        </div>
+
+        <!-- 热度榜图表 -->
+        <div class="panel">
+            <div class="panel-title">
+                <span>实时热度排行榜（ZSet 实时分数）</span>
+                <span class="tools">
+                    <el-button size="small" type="primary" @click="manualPreheat">立即预热 TopN</el-button>
+                    <el-button size="small" @click="loadRank">刷新</el-button>
+                </span>
+            </div>
+            <div id="chartRank" class="chart"></div>
+        </div>
+
+        <!-- 排行明细表 -->
+        <div class="panel">
+            <div class="panel-title">排行明细</div>
+            <el-table :data="rankList" border stripe>
+                <el-table-column label="排名" width="80">
+                    <template #default="scope">
+                        <el-tag :type="scope.$index === 0 ? 'danger' : (scope.$index === 1 ? 'warning' : (scope.$index === 2 ? 'success' : 'info'))">
+                            {{ scope.$index + 1 }}
+                        </el-tag>
+                    </template>
+                </el-table-column>
+                <el-table-column prop="productId" label="商品ID" width="90"></el-table-column>
+                <el-table-column prop="name" label="商品名称" min-width="160"></el-table-column>
+                <el-table-column prop="hotScore" label="实时热度分" width="120" sortable></el-table-column>
+                <el-table-column prop="viewCount" label="历史浏览量" width="120"></el-table-column>
+                <el-table-column prop="price" label="价格(元)" width="110"></el-table-column>
+            </el-table>
+        </div>
+    </div>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, onMounted } = Vue;
+
+    const app = createApp({
+        setup() {
+            const state = reactive({ rankList: [], autoStats: { lastPreheatCount: 0, lastPreheatTime: '未执行', autoPreheatRounds: 0 } });
+            let chart = null;
+
+            async function loadRank() {
+                try {
+                    state.rankList = await apiGet('/api/hotspot/rank?topN=10');
+                    renderChart();
+                } catch (e) { console.error('加载热度榜失败', e); }
+            }
+
+            async function loadAutoStats() {
+                try {
+                    const data = await apiGet('/api/hotspot/auto-stats');
+                    Object.assign(state.autoStats, data);
+                } catch (e) { console.error('加载自动预热状态失败', e); }
+            }
+
+            function renderChart() {
+                if (!chart) chart = echarts.init(document.getElementById('chartRank'));
+                // 倒序让第一名显示在顶部
+                const sorted = [...state.rankList].reverse();
+                chart.setOption({
+                    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                    grid: { left: 140, right: 40, top: 20, bottom: 40 },
+                    xAxis: { type: 'value', name: '热度分' },
+                    yAxis: { type: 'category', data: sorted.map(i => i.name || ('商品' + i.productId)) },
+                    series: [{
+                        type: 'bar', barWidth: 18,
+                        label: { show: true, position: 'right' },
+                        itemStyle: { color: '#667eea' },
+                        data: sorted.map(i => i.hotScore)
+                    }]
+                });
+            }
+
+            async function manualPreheat() {
+                try {
+                    const msg = await apiSend('/api/hotspot/preheat', 'POST');
+                    showToast(typeof msg === 'string' ? msg : '预热完成', 'success');
+                    loadRank();
+                    loadAutoStats();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            onMounted(() => {
+                renderHeader('hotspot');
+                loadRank();
+                loadAutoStats();
+                setInterval(loadRank, 5000);
+                setInterval(loadAutoStats, 10000);
+            });
+
+            return {
+                get rankList() { return state.rankList; },
+                get autoStats() { return state.autoStats; },
+                loadRank, manualPreheat
+            };
+        }
+    });
+    app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+    app.mount('#app');
+</script>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>商品管理 - 热点数据缓存预热与一致性保障系统</title>
+    <link rel="stylesheet" href="css/common.css">
+    <link rel="stylesheet" href="vendor/element-plus/index.css">
+    <script src="vendor/vue/vue.global.prod.js"></script>
+    <script src="vendor/element-plus/index.full.min.js"></script>
+    <script src="vendor/element-plus/locale/zh-cn.min.js"></script>
+    <script src="vendor/icons/index.iife.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <div id="header"></div>
+
+    <div class="container">
+        <div class="tip-box">
+            本页操作真实走 Cache Aside 策略：<b>查询</b>先查缓存、未命中回源数据库并写回缓存；
+            <b>更新/删除</b>触发延迟双删；<b>新增</b>清除可能存在的空值缓存。
+            点击「查看详情」可以观察命中率统计的实时变化。
+        </div>
+
+        <!-- 操作栏 -->
+        <div class="panel">
+            <div style="display:flex; gap:10px; align-items:center;">
+                <el-input v-model="keyword" placeholder="按商品名称搜索" style="width:260px" clearable></el-input>
+                <el-button type="primary" @click="openAdd">新增商品</el-button>
+                <span class="muted" style="margin-left:auto">共 {{ filtered.length }} 条</span>
+            </div>
+        </div>
+
+        <!-- 商品表格 -->
+        <div class="panel">
+            <el-table :data="filtered" border stripe>
+                <el-table-column prop="id" label="ID" width="70"></el-table-column>
+                <el-table-column prop="name" label="商品名称" min-width="160"></el-table-column>
+                <el-table-column prop="categoryName" label="分类" width="120">
+                    <template #default="scope">{{ categoryName(scope.row.categoryId) }}</template>
+                </el-table-column>
+                <el-table-column prop="price" label="价格(元)" width="110">
+                    <template #default="scope">{{ scope.row.price }}</template>
+                </el-table-column>
+                <el-table-column prop="stock" label="库存" width="90"></el-table-column>
+                <el-table-column prop="viewCount" label="浏览量" width="100" sortable></el-table-column>
+                <el-table-column label="状态" width="90">
+                    <template #default="scope">
+                        <el-tag :type="scope.row.status === 1 ? 'success' : 'info'">{{ scope.row.status === 1 ? '上架' : '下架' }}</el-tag>
+                    </template>
+                </el-table-column>
+                <el-table-column label="操作" width="240" fixed="right">
+                    <template #default="scope">
+                        <el-button size="small" type="primary" plain @click="viewDetail(scope.row)">查看详情</el-button>
+                        <el-button size="small" plain @click="openEdit(scope.row)">编辑</el-button>
+                        <el-button size="small" type="danger" plain @click="remove(scope.row)">删除</el-button>
+                    </template>
+                </el-table-column>
+            </el-table>
+        </div>
+    </div>
+
+    <!-- 新增/编辑对话框 -->
+    <el-dialog v-model="dialogVisible" :title="form.id ? '编辑商品' : '新增商品'" width="520px">
+        <el-form :model="form" label-width="90px">
+            <el-form-item label="商品名称"><el-input v-model="form.name" /></el-form-item>
+            <el-form-item label="分类">
+                <el-select v-model="form.categoryId" style="width:100%">
+                    <el-option v-for="c in categories" :key="c.id" :label="c.name" :value="c.id"></el-option>
+                </el-select>
+            </el-form-item>
+            <el-form-item label="价格(元)"><el-input-number v-model="form.price" :min="0" :precision="2" style="width:100%" /></el-form-item>
+            <el-form-item label="库存"><el-input-number v-model="form.stock" :min="0" style="width:100%" /></el-form-item>
+            <el-form-item label="状态">
+                <el-radio-group v-model="form.status">
+                    <el-radio :label="1">上架</el-radio>
+                    <el-radio :label="0">下架</el-radio>
+                </el-radio-group>
+            </el-form-item>
+            <el-form-item label="描述"><el-input v-model="form.description" type="textarea" :rows="2" /></el-form-item>
+        </el-form>
+        <template #footer>
+            <el-button @click="dialogVisible = false">取消</el-button>
+            <el-button type="primary" @click="save">保存</el-button>
+        </template>
+    </el-dialog>
+</div>
+
+<script src="js/common.js"></script>
+<script>
+    const { createApp, reactive, computed, onMounted } = Vue;
+
+    const app = createApp({
+        setup() {
+            const state = reactive({
+                products: [], categories: [], filtered: [],
+                keyword: '', accessing: false, dialogVisible: false,
+                form: { id: null, name: '', categoryId: null, price: 0, stock: 0, status: 1, description: '' }
+            });
+
+            async function loadProducts() {
+                state.products = await apiGet('/api/product/list');
+            }
+
+            async function loadCategories() {
+                state.categories = await apiGet('/api/category/list');
+            }
+
+            // filtered 改为 computed：由 keyword 与 products 自动驱动，输入/清空都实时生效
+            const filtered = computed(() => {
+                const kw = (state.keyword || '').trim();
+                return kw ? state.products.filter(p => p.name.includes(kw)) : state.products;
+            });
+
+            function categoryName(id) {
+                const c = state.categories.find(c => c.id === id);
+                return c ? c.name : '-';
+            }
+
+            /** 查看详情：走缓存接口，观察命中率变化 */
+            async function viewDetail(row) {
+                try {
+                    const p = await apiGet('/api/product/' + row.id);
+                    showToast(`商品「${p.name}」查询成功：价格 ${p.price} 元，库存 ${p.stock}，浏览量 ${p.viewCount}`, 'info');
+                    loadProducts();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            /** 模拟访问：批量请求热点商品，快速制造热度数据 */
+            function openAdd() {
+                state.form = { id: null, name: '', categoryId: state.categories[0] ? state.categories[0].id : null, price: 0, stock: 0, status: 1, description: '' };
+                state.dialogVisible = true;
+            }
+
+            function openEdit(row) {
+                state.form = { ...row };
+                state.dialogVisible = true;
+            }
+
+            async function save() {
+                try {
+                    if (state.form.id) {
+                        await apiSend('/api/product', 'PUT', state.form);
+                        showToast('更新成功，已触发延迟双删策略', 'success');
+                    } else {
+                        await apiSend('/api/product', 'POST', state.form);
+                        showToast('新增成功', 'success');
+                    }
+                    state.dialogVisible = false;
+                    loadProducts();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            async function remove(row) {
+                try {
+                    await ElementPlus.ElMessageBox.confirm(`确定删除商品「${row.name}」吗？删除后将触发延迟双删。`, '删除确认', { type: 'warning' });
+                } catch (e) { return; }  // 用户点了取消
+                try {
+                    await apiSend('/api/product/' + row.id, 'DELETE');
+                    showToast('删除成功，已触发延迟双删策略', 'success');
+                    loadProducts();
+                } catch (e) { showToast(e.message, 'error'); }
+            }
+
+            onMounted(() => {
+                renderHeader('products');
+                loadProducts();
+                loadCategories();
+            });
+
+            // 模板中直接访问 state 的字段（一律用 getter/setter，避免 setup 时的过期引用）
+            return {
+                get products() { return state.products; },
+                filtered,
+                get keyword() { return state.keyword; },
+                set keyword(v) { state.keyword = v; },
+                get dialogVisible() { return state.dialogVisible; },
+                set dialogVisible(v) { state.dialogVisible = v; },
+                get form() { return state.form; },
+                get categories() { return state.categories; },
+                categoryName, viewDetail, openAdd, openEdit, save, remove
+            };
+        }
+    });
+    app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+    app.mount('#app');
+</script>
+</body>
+</html>
