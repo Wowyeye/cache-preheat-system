@@ -1,0 +1,37 @@
+# ============================================================
+# 行尾统一策略
+#
+# 背景：本项目的镜像构建在 Linux 容器里执行，而仓库主要在 Windows 上开发。
+# Windows 默认 core.autocrlf=true 会把检出内容转成 CRLF，于是：
+#   - mvnw（bash 脚本，Dockerfile 里要 chmod +x ./mvnw 执行）会因为 CRLF 报
+#     "/usr/bin/env: 'sh\r': No such file or directory"
+#   - Dockerfile 的 `RUN ... \` 续行会因为行尾的 \r 变成非法指令
+# 所以对"要被 Linux 消费"的文件强制 LF。
+# ============================================================
+
+# 默认：仓库内统一按文本处理（索引里存 LF），检出时按下列规则
+* text=auto
+
+# —— 必须 LF（Linux 容器 / shell 消费）——
+mvnw                text eol=lf
+*.sh                text eol=lf
+Dockerfile          text eol=lf
+.dockerignore       text eol=lf
+.env.example        text eol=lf
+docker-compose.yml  text eol=lf
+
+# —— Windows 专用脚本保持 CRLF ——
+*.cmd               text eol=crlf
+*.bat               text eol=crlf
+*.ps1               text eol=crlf
+
+# —— 二进制，不做行尾转换 ——
+*.png               binary
+*.jpg               binary
+*.jpeg              binary
+*.gif               binary
+*.ico               binary
+*.zip               binary
+*.jar               binary
+*.pdf               binary
+frontend/vendor/**  binary
