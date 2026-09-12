@@ -80,8 +80,11 @@ jobs:
       - name: 断言接口文档与指标（v3.4）
         run: |
           set -e
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/swagger-ui.html)" = "200"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/v3/api-docs)" = "200"
+          # /swagger-ui.html 会 302 跳到 /swagger-ui/index.html，所以必须带 -L；
+          # 本机用 Invoke-WebRequest 测时默认跟随重定向，曾因此漏掉这个差异（CI 抓到了）
+          test "$(curl -sL -o /dev/null -w '%{http_code}' http://localhost:8083/swagger-ui.html)" = "200"
+          test "$(curl -sL -o /dev/null -w '%{http_code}' http://localhost:8083/swagger-ui/index.html)" = "200"
+          test "$(curl -sL -o /dev/null -w '%{http_code}' http://localhost:8083/v3/api-docs)" = "200"
           curl -fsS http://localhost:8083/actuator/prometheus | grep -q 'cache_access_total'
           curl -fsS http://localhost:8083/actuator/prometheus | grep -q 'cache_evict_retry_pending'
           echo "文档与指标断言通过"

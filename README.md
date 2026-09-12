@@ -353,7 +353,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | **数据库层集成测试** | ✅ **通过** | `DbLayerIT`：真实 `mysql:8.0` + `redis:7-alpine` 容器 + 完整 Spring 上下文，**7/7 通过**（含 Flyway 迁移版本、原子扣减、条件状态更新、并发双取消只回补一次） |
 | 镜像构建换源 | ✅ 通过 | `MVNW_REPOURL` + `MAVEN_MIRROR_URL` 指向阿里云后，镜像内 Maven 构建成功 |
 | **CI 首次运行** | ✅ 通过 | GitHub Actions run #1（push 到 main 触发）：`测试` Job 全绿（Testcontainers 在 runner 上**真跑**，不跳过）+ `docker compose 一键部署冒烟` Job 全绿（健康就绪 + 前端 200 + `/cache/summary` 200 + `/cache/stats` 401 + `/actuator/metrics` 404 断言全部通过） |
-| **Swagger UI（v3.4）** | ✅ 通过 | `/swagger-ui.html` 200、`/v3/api-docs` 200，解析出 **28 个路径 / 6 个 Tag**，30 个接口带中文 summary |
+| **Swagger UI（v3.4）** | ✅ 通过 | `/v3/api-docs` 200、`/swagger-ui.html` **302 → /swagger-ui/index.html 200**，解析出 **28 个路径 / 6 个 Tag**，30 个接口带中文 summary |
 | **Prometheus 指标（v3.4）** | ✅ 通过 | `/actuator/prometheus` 200，含 `cache_access_total`、`cache_path_seconds_count`、`cache_circuit_open`、`cache_delete_failures`、`cache_evict_retry_pending`；`/actuator/metrics` 仍为 404 |
 | **下单限流（v3.4）** | ✅ 通过 | 同一用户连续下单 12 次 → `200 × 10` + `429 × 2`（60 秒 10 单） |
 | 失效重试队列（v3.4） | ✅ 单元测试覆盖（6 项） | 成功出队 / 失败退避 / 熔断期不消耗次数 / 超限放弃 / 同 key 去重 / 队列满丢弃；线上指标 `cache_evict_retry*` 已就位（实测 pending=0）。**端到端触发受限**：Redis 宕机时鉴权 fail-closed，写请求进不来，故现实触发场景是 Redis 抖动（见 §9.2） |
