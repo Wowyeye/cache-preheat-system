@@ -72,6 +72,9 @@ cache:
   # Redis 本地熔断：连续失败 N 次后，接下来 open-ms 内的 Redis 调用直接走降级（不发起请求）
   breaker-failure-threshold: ${CACHE_BREAKER_THRESHOLD:1}
   breaker-open-ms: ${CACHE_BREAKER_OPEN_MS:5000}
+  # 失效重试队列（v3.4）：延迟双删失败后按退避重试，超过次数则放弃（靠 TTL 收敛）
+  evict-retry-max-attempts: ${CACHE_EVICT_RETRY_MAX_ATTEMPTS:6}
+  evict-retry-max-entries: ${CACHE_EVICT_RETRY_MAX_ENTRIES:10000}
 
 # ========== 应用级配置 ==========
 app:
@@ -89,23 +92,42 @@ app:
     trusted-proxies: ${APP_TRUSTED_PROXIES:}
 
 # ========== Actuator：健康检查与运维端点 ==========
-# 只暴露 health（compose/K8s 探活用）；metrics/info 原本匿名可读，属信息泄露面，这里关掉
+# 只暴露 health（compose/K8s 探活）+ prometheus（指标抓取）；metrics/info 保持关闭。
+# 注意：/actuator/prometheus 与 health 一样是公开的（Prometheus 要拉），
+#      生产环境应只在内网暴露它，或由抓取侧鉴权。
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
   endpoint:
     health:
       # 无 Spring Security 时 when_authorized 永不放行，等于 never；这里显式写清楚
       show-details: never
       probes:
         enabled: true   # 暴露 /actuator/health/liveness 与 /readiness（K8s 探针）
+    prometheus:
+      enabled: true
+  metrics:
+    tags:
+      application: cache-preheat-system
   health:
     redis:
       enabled: true
     db:
       enabled: true
+
+# ========== OpenAPI / Swagger UI（v3.4）==========
+# 文档：/swagger-ui.html   规范 JSON：/v3/api-docs
+# 生产可设 springdoc.api-docs.enabled=false 关闭，或只在内网开放
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+    tags-sorter: alpha
+    display-request-duration: true
 
 # ========== 日志：控制台 + 文件（按天 + 大小切割）==========
 logging:

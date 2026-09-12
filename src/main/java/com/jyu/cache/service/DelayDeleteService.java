@@ -42,6 +42,7 @@ public class DelayDeleteService {
     private final SafeRedisTemplate safeRedis;
     private final ScheduledExecutorService delayDeleteExecutor;
     private final CacheProperties cacheProperties;
+    private final EvictRetryQueue retryQueue;
 
     /** 第一次删除失败次数 */
     private final AtomicLong firstDeleteFailures = new AtomicLong();
@@ -51,10 +52,12 @@ public class DelayDeleteService {
 
     public DelayDeleteService(SafeRedisTemplate safeRedis,
                               ScheduledExecutorService delayDeleteExecutor,
-                              CacheProperties cacheProperties) {
+                              CacheProperties cacheProperties,
+                              EvictRetryQueue retryQueue) {
         this.safeRedis = safeRedis;
         this.delayDeleteExecutor = delayDeleteExecutor;
         this.cacheProperties = cacheProperties;
+        this.retryQueue = retryQueue;
     }
 
     /**
@@ -84,8 +87,9 @@ public class DelayDeleteService {
             log.info("[延迟双删] key={} 第一次删除完成", key);
         } else {
             long fails = firstDeleteFailures.incrementAndGet();
-            log.error("[延迟双删] key={} 第一次删除未成功（累计 {} 次；Redis 熔断或异常），存在脏缓存风险，TTL 兜底",
-                    key, fails);
+            log.error("[延迟双删] key={} 第一次删除未成功（累计 {} 次；Redis 熔断或异常），"
+                    + "已交给失效重试队列，TTL 兜底", key, fails);
+            retryQueue.submit(key, "第一次删除失败");
         }
     }
 
@@ -98,15 +102,32 @@ public class DelayDeleteService {
                     log.info("[延迟双删] key={} 第二次删除完成（延迟 {}ms）", key, delayMs);
                 } else {
                     long fails = secondDeleteFailures.incrementAndGet();
-                    log.error("[延迟双删] key={} 第二次删除未成功（累计失败 {} 次；Redis 熔断或异常），存在短暂脏缓存风险，TTL 兜底",
-                            key, fails);
+                    log.error("[延迟双删] key={} 第二次删除未成功（累计失败 {} 次；Redis 熔断或异常），"
+                            + "已交给失效重试队列，TTL 兜底", key, fails);
+                    retryQueue.submit(key, "第二次删除失败");
                 }
             }, delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
-            // 停机中：第二次删除排不进去，记一次失败，靠 TTL 兜底
+            // 停机中：第二次删除排不进去，记一次失败 + 入重试队列，靠 TTL 兜底
             secondDeleteFailures.incrementAndGet();
-            log.error("[延迟双删] key={} 第二次删除未能排入调度（{}），依赖 TTL 兜底", key, e.getMessage());
+            retryQueue.submit(key, "第二次删除未能排入调度");
+            log.error("[延迟双删] key={} 第二次删除未能排入调度（{}），已入重试队列", key, e.getMessage());
         }
+    }
+
+    /** 供监控接口读取：当前待重试的失效任务数（v3.4） */
+    public int getRetryPendingCount() {
+        return retryQueue.pendingCount();
+    }
+
+    /** 供监控接口读取：重试成功次数（v3.4） */
+    public long getRetrySuccessCount() {
+        return retryQueue.getRetrySuccess();
+    }
+
+    /** 供监控接口读取：重试耗尽（放弃）次数（v3.4，一致性缺口的最终出口） */
+    public long getRetryExhaustedCount() {
+        return retryQueue.getExhausted();
     }
 
     /** 供监控接口读取：第一次删除失败累计 */

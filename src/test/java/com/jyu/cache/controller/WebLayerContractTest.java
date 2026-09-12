@@ -41,7 +41,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   内部统计接口不能让游客读。
  * 之前这些只用 curl 手工验过一遍——重构一次就可能悄悄回退。这里把它们钉成自动化断言。
  */
-@WebMvcTest(controllers = {ProductController.class, OrderAdminController.class, AuthController.class})
+@WebMvcTest(controllers = {ProductController.class, OrderAdminController.class,
+        AuthController.class, OrderController.class})
 @DisplayName("Web 层契约测试（状态码 / 权限矩阵）")
 class WebLayerContractTest {
 
@@ -55,6 +56,7 @@ class WebLayerContractTest {
     @MockBean private UserService userService;
     @MockBean private TokenService tokenService;
     @MockBean private ClientIpResolver clientIpResolver;
+    @MockBean private com.jyu.cache.common.RateLimiter rateLimiter;
 
     /** 让 XFF 解析走真实实现（默认不信任代理） */
     private void stubClientIp() {
@@ -241,5 +243,41 @@ class WebLayerContractTest {
         mockMvc.perform(post("/api/product").header("Authorization", "bad-token")
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    // ==================== 下单限流（v3.4） ====================
+
+    @Test
+    @DisplayName("下单限流触发 -> 429（限流器拒绝时不进入业务逻辑）")
+    void orderCreate_rateLimited_returns429() throws Exception {
+        asNormalUser();
+        org.mockito.Mockito.doThrow(new BusinessException(429, "下单过于频繁，请稍后再试"))
+                .when(rateLimiter).checkOrderAllowed(anyLong());
+
+        mockMvc.perform(post("/api/order/create").header("Authorization", USER_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":[{\"productId\":1,\"quantity\":1}],\"remark\":\"\"}"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.code").value(429));
+        // 被限流时不应创建订单
+        org.mockito.Mockito.verify(orderService, org.mockito.Mockito.never())
+                .createOrder(anyLong(), any(), any());
+    }
+
+    @Test
+    @DisplayName("游客下单 -> 401（拦截器拦下，未进入限流器与业务逻辑）")
+    void orderCreate_withoutToken_returns401() throws Exception {
+        mockMvc.perform(post("/api/order/create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":[{\"productId\":1,\"quantity\":1}]}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("游客查我的订单 -> 401（方法内 requireLogin 兜底，不返回 500）")
+    void myOrders_withoutToken_returns401() throws Exception {
+        mockMvc.perform(get("/api/order/my"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(401));
     }
 }

@@ -57,11 +57,11 @@ public class RateLimiter {
             return;
         }
         try {
-            if (overLimit(KEY_USERNAME + username)) {
+            if (overLimit(KEY_USERNAME + username, MAX_ATTEMPTS)) {
                 log.warn("[限流] 用户名 {} 登录尝试过于频繁", username);
                 throw new com.jyu.cache.common.BusinessException(429, "登录尝试过于频繁，请 1 分钟后再试");
             }
-            if (overLimit(KEY_IP + ip)) {
+            if (overLimit(KEY_IP + ip, MAX_ATTEMPTS)) {
                 log.warn("[限流] IP {} 登录尝试过于频繁", ip);
                 throw new com.jyu.cache.common.BusinessException(429, "该 IP 登录尝试过于频繁，请 1 分钟后再试");
             }
@@ -107,16 +107,62 @@ public class RateLimiter {
     }
 
     /** 只读检查：计数达到上限即拒绝（不递增，否则每次失败会被计两次、阈值腰斩） */
-    private boolean overLimit(String key) {
+    private boolean overLimit(String key, int maxAttempts) {
         Object value = redisTemplate.opsForValue().get(key);
         if (value == null) {
             return false;
         }
         try {
-            return Long.parseLong(String.valueOf(value)) >= MAX_ATTEMPTS;
+            return Long.parseLong(String.valueOf(value)) >= maxAttempts;
         } catch (NumberFormatException e) {
             log.warn("[限流] 计数键 {} 的值不是数字（{}），按未超限处理", key, value);
             return false;
+        }
+    }
+
+    // ================================================================
+    // 下单限流（v3.4）：按用户维度限制下单频率
+    // 为什么要加：下单会真扣库存 + 写订单表，是唯一有"写放大"的用户入口；
+    //            刷单会同时打满 DB 连接和库存行锁，比登录爆破更伤系统。
+    // ================================================================
+
+    private static final String KEY_ORDER = "order:rate:";
+
+    /** 窗口内允许的最大下单次数 */
+    private static final int ORDER_MAX_PER_WINDOW = 10;
+
+    /** 下单前检查（Redis 故障/熔断时放行：下单是核心业务，不能因限流组件故障而不可用） */
+    public void checkOrderAllowed(Long userId) {
+        if (breaker.isOpen()) {
+            log.warn("[限流] Redis 熔断中，下单检查放行");
+            return;
+        }
+        try {
+            if (overLimit(KEY_ORDER + userId, ORDER_MAX_PER_WINDOW)) {
+                log.warn("[限流] 用户 {} 下单过于频繁", userId);
+                throw new BusinessException(429, "下单过于频繁，请稍后再试");
+            }
+            breaker.recordSuccess();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            breaker.recordFailure("下单限流检查 -> " + e.getMessage());
+            log.warn("[限流] Redis 不可用，下单检查放行：{}", e.getMessage());
+        }
+    }
+
+    /** 下单成功后记账 */
+    public void recordOrderPlaced(Long userId) {
+        if (breaker.isOpen()) {
+            log.debug("[限流] Redis 熔断中，跳过下单记账");
+            return;
+        }
+        try {
+            incr(KEY_ORDER + userId);
+            breaker.recordSuccess();
+        } catch (Exception e) {
+            breaker.recordFailure("下单记账 -> " + e.getMessage());
+            log.warn("[限流] 下单记账失败（忽略）：{}", e.getMessage());
         }
     }
 

@@ -41,6 +41,7 @@ class DelayDeleteServiceTest {
     private static final String KEY = "cache:product:1";
 
     @Mock private SafeRedisTemplate safeRedis;
+    @Mock private EvictRetryQueue retryQueue;
 
     private ScheduledExecutorService executor;
     private DelayDeleteService delayDeleteService;
@@ -51,7 +52,7 @@ class DelayDeleteServiceTest {
         properties.setDelayDeleteMs(40L);
 
         executor = Executors.newScheduledThreadPool(2);
-        delayDeleteService = new DelayDeleteService(safeRedis, executor, properties);
+        delayDeleteService = new DelayDeleteService(safeRedis, executor, properties, retryQueue);
         // 默认删除成功
         lenient().when(safeRedis.deleteQuietly(anyString())).thenReturn(true);
     }
@@ -103,8 +104,8 @@ class DelayDeleteServiceTest {
     }
 
     @Test
-    @DisplayName("删除失败会被记账（一致性缺口可观测，而不是只写日志）")
-    void deleteFailures_areCounted() {
+    @DisplayName("删除失败会被记账并入重试队列（一致性缺口可观测 + 可自愈）")
+    void deleteFailures_areCountedAndQueued() {
         when(safeRedis.deleteQuietly(KEY)).thenReturn(false);   // 两次都失败（Redis 异常或熔断）
 
         delayDeleteService.evictWithDelay(KEY);
@@ -112,6 +113,9 @@ class DelayDeleteServiceTest {
         assertEquals(1, delayDeleteService.getFirstDeleteFailures());
         await().atMost(Duration.ofSeconds(3))
                 .untilAsserted(() -> assertEquals(1, delayDeleteService.getSecondDeleteFailures()));
+        // v3.4：失败不再只是记日志，而是交给重试队列（同一 key 去重，submit 至少被调用一次）
+        verify(retryQueue, org.mockito.Mockito.atLeastOnce()).submit(org.mockito.ArgumentMatchers.eq(KEY),
+                anyString());
     }
 
     @Test

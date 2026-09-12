@@ -64,6 +64,12 @@ public class CacheProperties {
     /** Redis 本地熔断：打开后多少毫秒内的 Redis 调用直接走降级（不再发起请求） */
     private Long breakerOpenMs = 5000L;
 
+    /** 失效重试队列：最多重试次数（超过则放弃，脏数据由 TTL 收敛） */
+    private Integer evictRetryMaxAttempts = 6;
+
+    /** 失效重试队列：容量上限（满了丢弃并计数，避免内存被异常流量拖垮） */
+    private Integer evictRetryMaxEntries = 10_000;
+
     @PostConstruct
     public void printConfig() {
         log.info("========================================");
@@ -72,6 +78,7 @@ public class CacheProperties {
         log.info("  延迟双删间隔: {}ms | 锁等待: {}ms | 榜单容量: {} / {}天",
                 delayDeleteMs, lockWaitMs, hotRankMaxSize, hotRankTtlDays);
         log.info("  Redis 熔断: 连续失败 {} 次后打开 {}ms", breakerFailureThreshold, breakerOpenMs);
+        log.info("  失效重试: 最多 {} 次 / 队列上限 {} 条", evictRetryMaxAttempts, evictRetryMaxEntries);
         log.info("========================================");
     }
 }

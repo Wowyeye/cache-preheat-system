@@ -77,6 +77,15 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/actuator/metrics)" = "404"
           echo "冒烟断言全部通过"
 
+      - name: 断言接口文档与指标（v3.4）
+        run: |
+          set -e
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/swagger-ui.html)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/v3/api-docs)" = "200"
+          curl -fsS http://localhost:8083/actuator/prometheus | grep -q 'cache_access_total'
+          curl -fsS http://localhost:8083/actuator/prometheus | grep -q 'cache_evict_retry_pending'
+          echo "文档与指标断言通过"
+
       - name: 失败时打印容器日志
         if: failure()
         run: docker compose logs --tail 150

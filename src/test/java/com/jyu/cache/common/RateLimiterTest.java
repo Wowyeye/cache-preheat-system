@@ -41,11 +41,12 @@ class RateLimiterTest {
     @Mock private ValueOperations<String, Object> valueOps;
 
     private RateLimiter rateLimiter;
+    private RedisCircuitBreaker breaker;
 
     @BeforeEach
     void setUp() {
         // 阈值 1 + 极短冷却：默认语义（失败即熔断）在单测里可直接验证
-        RedisCircuitBreaker breaker = new RedisCircuitBreaker(1, 50L, System::currentTimeMillis);
+        breaker = new RedisCircuitBreaker(1, 50L, System::currentTimeMillis);
         rateLimiter = new RateLimiter(redisTemplate, breaker);
     }
 
@@ -175,5 +176,43 @@ class RateLimiterTest {
 
         verify(redisTemplate).delete(USER_KEY);
         verify(redisTemplate).delete(IP_KEY);
+    }
+
+    // ==================== 下单限流（v3.4） ====================
+
+    @Test
+    @DisplayName("下单限流：窗口内允许 10 单，第 11 单 429")
+    void orderLimit_allowsTenThenRejects() {
+        AtomicLong count = new AtomicLong();
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.increment(anyString())).thenAnswer(inv -> count.incrementAndGet());
+        when(valueOps.get(anyString())).thenAnswer(inv -> count.get() == 0 ? null : count.get());
+
+        for (int i = 1; i <= 10; i++) {
+            assertDoesNotThrow(() -> rateLimiter.checkOrderAllowed(1L), "第 " + i + " 单应放行");
+            rateLimiter.recordOrderPlaced(1L);
+        }
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> rateLimiter.checkOrderAllowed(1L));
+        assertEquals(429, ex.getCode());
+    }
+
+    @Test
+    @DisplayName("下单限流：Redis 故障时放行（不因限流组件故障挡住核心业务）")
+    void orderLimit_failsOpenWhenRedisDown() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get(anyString())).thenThrow(new RedisConnectionFailureException("down"));
+
+        assertDoesNotThrow(() -> rateLimiter.checkOrderAllowed(1L));
+    }
+
+    @Test
+    @DisplayName("下单限流：熔断中直接放行且不碰 Redis")
+    void orderLimit_skipsWhenCircuitOpen() {
+        breaker.recordFailure("redis down");   // 阈值 1 -> 立即熔断
+
+        assertDoesNotThrow(() -> rateLimiter.checkOrderAllowed(1L));
+        assertDoesNotThrow(() -> rateLimiter.recordOrderPlaced(1L));
+        verify(redisTemplate, never()).opsForValue();
     }
 }

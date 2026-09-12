@@ -5,6 +5,8 @@ import com.jyu.cache.common.Result;
 import com.jyu.cache.common.UserContext;
 import com.jyu.cache.service.TokenService;
 import com.jyu.cache.service.UserService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
@@ -25,6 +27,7 @@ import java.util.Map;
  *       否则伪造该头即可换 IP 维度计数、绕过限流
  */
 @Slf4j
+@Tag(name = "认证", description = "注册 / 登录 / 登出 / 当前用户")
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -56,12 +59,14 @@ public class AuthController {
         private String password;
     }
 
+    @Operation(summary = "用户注册（游客可调）", description = "用户名至少 3 字符、密码至少 6 位；用户名已存在返回 409")
     @PostMapping("/register")
     public Result<UserContext.LoginUser> register(@jakarta.validation.Valid @RequestBody RegisterReq req) {
         return Result.success("注册成功", userService.register(req.getUsername(), req.getPassword(), req.getNickname()));
     }
 
     /** 登录：返回 token + 用户信息（带 IP 限流） */
+    @Operation(summary = "登录签发 token（游客可调，IP 限流）", description = "按用户名与客户端 IP 双维度限流，超限 429；密码错误 401，账号禁用 403")
     @PostMapping("/login")
     public Result<Map<String, Object>> login(@jakarta.validation.Valid @RequestBody LoginReq req,
                                              HttpServletRequest request) {
@@ -71,12 +76,14 @@ public class AuthController {
         return Result.success("登录成功", Map.of("token", token, "user", user));
     }
 
+    @Operation(summary = "退出登录（需登录，作废 token）", description = "写操作先经拦截器校验登录，未登录 401")
     @PostMapping("/logout")
     public Result<Void> logout(@RequestHeader(value = "Authorization", required = false) String token) {
         userService.logout(token);
         return Result.success("已退出登录", null);
     }
 
+    @Operation(summary = "当前登录用户（需登录）", description = "未登录返回 401")
     @GetMapping("/me")
     public Result<UserContext.LoginUser> me() {
         UserContext.LoginUser user = UserContext.getUser();

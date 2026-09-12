@@ -1,6 +1,7 @@
 package com.jyu.cache.service;
 
 import com.jyu.cache.common.SafeRedisTemplate;
+import com.jyu.cache.monitor.CacheMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -33,14 +34,22 @@ public class CacheStatsService {
 
     private final RedisTemplate<String, Object> redisTemplate;
     private final SafeRedisTemplate safeRedis;
+    private final CacheMetrics metrics;
 
-    public CacheStatsService(RedisTemplate<String, Object> redisTemplate, SafeRedisTemplate safeRedis) {
+    public CacheStatsService(RedisTemplate<String, Object> redisTemplate,
+                             SafeRedisTemplate safeRedis,
+                             CacheMetrics metrics) {
         this.redisTemplate = redisTemplate;
         this.safeRedis = safeRedis;
+        this.metrics = metrics;
     }
 
-    /** 记录一次命中（含命中路径耗时，纳秒） */
+    /**
+     * 记录一次命中（含命中路径耗时，纳秒）
+     * 双写：Redis Hash（站内大盘、多实例汇总、重启不丢）+ Micrometer（/actuator/prometheus）
+     */
     public void recordHit(long elapsedNanos) {
+        metrics.recordHit(elapsedNanos);
         safeRedis.tryRun(() -> {
             redisTemplate.opsForHash().increment(STATS_KEY, "hit", 1);
             redisTemplate.opsForHash().increment(STATS_KEY, "cachePathNanos", elapsedNanos);
@@ -50,6 +59,7 @@ public class CacheStatsService {
 
     /** 记录一次未命中（含回源路径耗时，纳秒） */
     public void recordMiss(long elapsedNanos) {
+        metrics.recordMiss(elapsedNanos);
         safeRedis.tryRun(() -> {
             redisTemplate.opsForHash().increment(STATS_KEY, "miss", 1);
             redisTemplate.opsForHash().increment(STATS_KEY, "dbPathNanos", elapsedNanos);
@@ -57,18 +67,25 @@ public class CacheStatsService {
         });
     }
 
-    /** 记录穿透命中（命中空值标记，计入 hit） */
+    /** 记录穿透命中（命中空值标记；Redis 侧计入 hit，指标侧单独打 result=null_hit 便于区分） */
     public void recordNullHit(long elapsedNanos) {
-        recordHit(elapsedNanos);
+        metrics.recordNullHit(elapsedNanos);
+        safeRedis.tryRun(() -> {
+            redisTemplate.opsForHash().increment(STATS_KEY, "hit", 1);
+            redisTemplate.opsForHash().increment(STATS_KEY, "cachePathNanos", elapsedNanos);
+            redisTemplate.opsForHash().increment(STATS_KEY, "cachePathCount", 1);
+        });
     }
 
     /** 记录一次降级（Redis 故障直查 DB） */
     public void recordDegrade() {
+        metrics.recordDegrade();
         safeRedis.tryRun(() -> redisTemplate.opsForHash().increment(STATS_KEY, "degrade", 1));
     }
 
     /** 记录一次锁竞争降级（未拿到分布式锁直接回源） */
     public void recordLockFallback() {
+        metrics.recordLockFallback();
         safeRedis.tryRun(() -> redisTemplate.opsForHash().increment(STATS_KEY, "lockFallback", 1));
     }
 

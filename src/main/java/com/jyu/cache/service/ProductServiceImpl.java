@@ -283,6 +283,10 @@ public class ProductServiceImpl implements ProductService {
         stats.put("productTotal", productMapper.countAll());
         stats.put("firstDeleteFailures", delayDeleteService.getFirstDeleteFailures());
         stats.put("secondDeleteFailures", delayDeleteService.getSecondDeleteFailures());
+        // v3.4：失效重试队列状态（一致性缺口的可观测出口）
+        stats.put("evictRetryPending", delayDeleteService.getRetryPendingCount());
+        stats.put("evictRetrySuccess", delayDeleteService.getRetrySuccessCount());
+        stats.put("evictRetryExhausted", delayDeleteService.getRetryExhaustedCount());
         return stats;
     }
 
