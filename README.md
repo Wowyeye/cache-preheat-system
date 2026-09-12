@@ -344,6 +344,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | Testcontainers 集成测试 | ✅ **通过** | Ryuk + `redis:7-alpine` 真实启动，`RedisLayerIT` 4/4 通过（0 跳过） |
 | **数据库层集成测试** | ✅ **通过** | `DbLayerIT`：真实 `mysql:8.0` + `redis:7-alpine` 容器 + 完整 Spring 上下文，**7/7 通过**（含 Flyway 迁移版本、原子扣减、条件状态更新、并发双取消只回补一次） |
 | 镜像构建换源 | ✅ 通过 | `MVNW_REPOURL` + `MAVEN_MIRROR_URL` 指向阿里云后，镜像内 Maven 构建成功 |
+| **CI 首次运行** | ✅ 通过 | GitHub Actions run #1（push 到 main 触发）：`测试` Job 全绿（Testcontainers 在 runner 上**真跑**，不跳过）+ `docker compose 一键部署冒烟` Job 全绿（健康就绪 + 前端 200 + `/cache/summary` 200 + `/cache/stats` 401 + `/actuator/metrics` 404 断言全部通过） |
 
 ### 9.2 已知限制（未修，属取舍或待办）
 

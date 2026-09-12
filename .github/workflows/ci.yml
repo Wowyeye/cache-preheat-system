@@ -24,7 +24,7 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: mvn verify（90 单测 + DbLayerIT/RedisLayerIT）
+      - name: mvn verify（单元测试 + Testcontainers 集成测试）
         # Mockito 的 inline mock maker 在某些环境需要显式允许 self-attach
         run: mvn -B verify -DargLine=-Djdk.attach.allowAttachSelf=true
 
