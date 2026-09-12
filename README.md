@@ -77,6 +77,15 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 | 7 | **"Redis 无密码可留空"其实是坏的**：`spring.data.redis.password` 解析成空串时，Redisson 会真发一条 `AUTH `，被未启用密码的 Redis 以 `ERR AUTH` 拒绝 → 应用启动失败（DbLayerIT 实测复现） | `RedisConfig` 显式装配 `RedissonClient`：**空串/空白一律按"无密码"处理**，并在这里统一设置 Redisson 超时/重试；DbLayerIT 用的就是一个无密码 Redis 容器，等于给这条路径加了回归测试 |
 | 8 | 数据库层零集成测试：Mapper/XML/Flyway/事务边界全靠手工实测 | 新增 `DbLayerIT`（Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway）：7 项覆盖迁移版本、原子扣减、条件状态更新、下单/取消全链路、**并发双取消只回补一次**、Cache Aside、穿透空标记 |
 
+### 1.4 v3.3：限流与鉴权边界加固
+
+| # | 问题（实测可复现） | 处理 |
+|---|-------------------|------|
+| 1 | **伪造 `X-Forwarded-For` 即可绕过 IP 维度限流**：旧实现无条件取 XFF 第一段当客户端 IP，而 XFF 是请求头，谁都能写——每次请求换个值就等于换个 IP | 新增 `ClientIpResolver`：默认**完全不信任** XFF（取 socket 地址）；只有直连方命中 `app.security.trusted-proxies` 时才解析，且取 XFF 链上**最右侧的不可信地址**。实测：6 次不同用户名 + 6 个不同伪造 XFF → 第 6 次被 IP 维度 429 拦住（日志 `[限流] IP 172.18.0.1 ...`），窗口过期后自动恢复 |
+| 2 | `/api/product/cache/stats` 无鉴权，游客可读内部运维计数（缓存 key 数、降级次数、双删失败次数） | 拆成两个接口：`/cache/summary`（公开，只给命中率与耗时等演示指标）+ `/cache/stats`（ADMIN，完整内部计数）；前端监控大盘/耗时对比页按角色自动选接口，游客看只读视图 |
+| 3 | `/actuator/metrics`、`/actuator/info` 匿名可读（信息泄露面） | Actuator 只暴露 `health`（compose/K8s 探针用），`show-details: never`；实测 metrics/info 均 404 |
+| 4 | 前端把管理员按钮暴露给所有人（点了才报 401/403） | 监控大盘的运维区、热点页"立即预热"、耗时对比的"运行实验"按角色隐藏/禁用，并给出原因提示 |
+
 ---
 
 ## 二、技术栈
@@ -224,6 +233,11 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 固定窗口 60 秒 **5 次失败**（只读检查 + 失败记账，v3.1 修正后阈值语义与文档一致），
 用户名 + IP 双维度，命中即 429；Redis 故障放行；计数键缺 TTL 时自愈补设。
 
+**客户端 IP 怎么来的（v3.3）**：默认取 socket 地址，**不信任** `X-Forwarded-For`——
+否则伪造该头即可让每次请求都变成"新 IP"，IP 维度形同虚设（实测可复现）。
+部署在 Nginx/网关后面时，把网关地址填进 `APP_TRUSTED_PROXIES`（支持 `10.0.0.0/8` 这样的 CIDR），
+此时才会解析 XFF，并取链上**最右侧的不可信地址**作为真实客户端。
+
 ### 8. Redis 本地熔断（v3.2）
 ```
 连续失败达阈值（默认 1）-> 熔断 5s（cache.breaker-*/CACHE_BREAKER_* 可配）
@@ -240,7 +254,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 层级 | 命令 | 覆盖 | 状态 |
 |------|------|------|------|
-| 单元测试 | `.\mvnw.cmd test` | **78 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机 | ✅ 实测全绿（BUILD SUCCESS） |
+| 单元测试 | `.\mvnw.cmd test` | **90 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机/可信代理与 XFF 防伪造 | ✅ 实测全绿（BUILD SUCCESS） |
 | Redis 层集成测试 | `.\mvnw.cmd verify` | Testcontainers 真实 `redis:7-alpine` 容器：生产序列化配置往返、空哨兵值、SCAN、ZSet 热度 | ✅ **实测真跑通过**（4/4，无 Docker 时如实 skip） |
 | 数据库层集成测试 | `.\mvnw.cmd verify` | `DbLayerIT`：Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway：迁移版本/原子扣减/条件状态更新/下单取消全链路/**并发双取消只回补一次**/Cache Aside/穿透标记 | ✅ **实测真跑通过**（7/7，无 Docker 时如实 skip） |
 | 构建 | `.\mvnw.cmd clean package` | 可执行 fat jar | ✅ 实测（58 MB / `BOOT-INF/lib` 89 项）；**需先停掉正在运行的实例**（Windows 文件占用） |
@@ -292,13 +306,15 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 项 | 状态 | 证据 |
 |----|------|------|
-| 33 → 78 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
+| 33 → 90 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
 | fat jar 构建 | ✅ 通过 | 58,453,755 B，`BOOT-INF/lib` 89 项 |
 | 登录 / 权限矩阵 | ✅ 通过 | `admin/admin123` 登录 200；普通用户访问管理接口 403；未登录管理接口 401；无效 token 401 |
 | Cache Aside 命中 | ✅ 通过 | 二次查询走缓存；统计 hit/miss、缓存 4.86ms vs DB 14.03ms |
 | 穿透防护 | ✅ 通过 | 查不存在 ID：首次 miss+1，二次 hit+1（命中空值标记，未打库） |
 | 防超卖 | ✅ 通过 | 库存 5000 下单 999999 件 → 409，库存不变 |
-| 限流 | ✅ 通过（修正后） | 修正前实测第 4 次 429（阈值被算成 3）；修正后实测 5 次 401 后第 6 次 429 |
+| 限流 | ✅ 通过（修正后） | 修正前实测第 4 次 429（阈值被算成 3）；修正后实测 5 次 401 后第 6 次 429；窗口过期后自动恢复 |
+| **限流边界（v3.3）** | ✅ 通过 | 6 次不同用户名 + 6 个不同伪造 `X-Forwarded-For`（同一真实 IP）→ 第 6 次被 IP 维度 429 拦住，日志 `[限流] IP 172.18.0.1 ...`；证明伪造头不再能绕过 |
+| **鉴权边界（v3.3）** | ✅ 通过 | 游客读 `/api/product/cache/stats` → 401；`/cache/summary` → 200 且不含内部计数；管理员读 stats → 200 含全部计数；`/actuator/metrics`、`/actuator/info` → 404 |
 | 订单超时自动取消 | ✅ 通过（全链路） | 阈值设 1 分钟：下单 → 库存 5000→4999 → 调度器 60s 内取消 → 状态 `CANCELLED` + 库存回 5000 |
 | 热点榜防污染 | ✅ 通过 | 不存在的 888777 查询后**不在榜**；真实商品访问正常加分（1→3） |
 | 自动预热统计 | ✅ 通过 | `autoPreheatRounds` 随 60s 轮次递增（修正前恒为 0） |
@@ -324,8 +340,8 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 |----|------|------|
 | 本地 jar 不含前端 | 同源托管只在 Docker 镜像内成立；本地 8083 访问页面 404（已实测对比） | 若要在本地也托管，把 `frontend/*` 复制进 `src/main/resources/static` 后再打包 |
 | Docker 构建依赖网络 | 基础镜像 `mysql:8.0`/`temurin` 在国内可能拉不动（本项目实测用过 `docker.1ms.run` 镜像源拉取后 `docker tag` 回官方名）；Maven 换源见 §四 | 稳定网络或预先拉好镜像 + 配 `registry-mirrors` |
-| X-Forwarded-For 无条件信任 | `AuthController.clientIp()` 优先取该头 → 伪造头部即可换 IP 维度计数绕过 IP 限流 | 部署时由网关/负载均衡覆盖该头，或改为只信任已知代理 |
-| 缓存统计与 Actuator 匿名可读 | `GET /api/product/cache/stats`、`/actuator/health,info,metrics` 无鉴权（监控大盘对游客开放，属演示取舍） | 生产建议加鉴权或把暴露端点收窄到 `health` |
+| X-Forwarded-For 与代理部署 | v3.3 起默认**不信任** XFF（取 socket 地址）；只有在 Nginx/网关后面才需要配置 `APP_TRUSTED_PROXIES` | 部署在反向代理后时把网关地址（支持 CIDR）填进该变量，否则所有请求会被算成同一个 IP |
+| 缓存统计与 Actuator | v3.3 起：`/cache/stats` 仅管理员、`/cache/summary` 公开且只含演示指标；Actuator 只暴露 `health` | 如需更多运维端点，建议接入 Spring Security 后再开放 |
 | 下架商品仍可被读路径命中 | 读缓存/回源不校验 `status`，`status=0` 的商品仍能查到并回写缓存（仅启动预热按 `status=1` 过滤） | 若要下架即不可见，需在读路径加 status 判断并同步清理缓存 |
 | 一致性依赖双删 + TTL | 删除失败只计数不重试，无 binlog/MQ 补偿；极端情况下脏数据靠 TTL（1800s）收敛 | 上量后引入 binlog 订阅或消息驱动失效，并给 key 加版本号 |
 | 种子弱口令 | `admin/admin123`、`user1|user2/123456` 随仓库发布 | 公开仓库前移除种子账号或强制首登改密 |
