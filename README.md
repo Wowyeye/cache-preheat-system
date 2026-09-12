@@ -85,6 +85,7 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 | 2 | `/api/product/cache/stats` 无鉴权，游客可读内部运维计数（缓存 key 数、降级次数、双删失败次数） | 拆成两个接口：`/cache/summary`（公开，只给命中率与耗时等演示指标）+ `/cache/stats`（ADMIN，完整内部计数）；前端监控大盘/耗时对比页按角色自动选接口，游客看只读视图 |
 | 3 | `/actuator/metrics`、`/actuator/info` 匿名可读（信息泄露面） | Actuator 只暴露 `health`（compose/K8s 探针用），`show-details: never`；实测 metrics/info 均 404 |
 | 4 | 前端把管理员按钮暴露给所有人（点了才报 401/403） | 监控大盘的运维区、热点页"立即预热"、耗时对比的"运行实验"按角色隐藏/禁用，并给出原因提示 |
+| 5 | Spring Boot 3.2.5 已过 OSS 支持期，且随附 spring-web 6.1.6 / tomcat-embed 10.1.20 带有已修 CVE | 升到 **3.2.12**（3.2 线最后一版）：Spring Framework **6.1.15**、tomcat-embed-core **10.1.33**；同小版本升级，90 单测 + 11 集成测试全绿，容器内实测启动正常 |
 
 ---
 
@@ -92,7 +93,7 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 
 | 层次 | 技术 |
 |------|------|
-| 后端 | Spring Boot 3.2.5（JDK 17 编译 / 21 运行）|
+| 后端 | Spring Boot 3.2.12（JDK 17 编译 / 21 运行；内嵌 Tomcat 10.1.33、Spring Framework 6.1.15）|
 | 缓存 | Redis 7（Redisson 3.27.2 提供连接工厂）+ Redisson 分布式锁 |
 | ORM | MyBatis 3.0.3 + MySQL 8.0 + Druid 连接池 |
 | 迁移 | Flyway（数据库版本化）|
@@ -345,7 +346,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | 下架商品仍可被读路径命中 | 读缓存/回源不校验 `status`，`status=0` 的商品仍能查到并回写缓存（仅启动预热按 `status=1` 过滤） | 若要下架即不可见，需在读路径加 status 判断并同步清理缓存 |
 | 一致性依赖双删 + TTL | 删除失败只计数不重试，无 binlog/MQ 补偿；极端情况下脏数据靠 TTL（1800s）收敛 | 上量后引入 binlog 订阅或消息驱动失效，并给 key 加版本号 |
 | 种子弱口令 | `admin/admin123`、`user1|user2/123456` 随仓库发布 | 公开仓库前移除种子账号或强制首登改密 |
-| 依赖版本偏旧 | Spring Boot 3.2.5（3.2.x 已停止 OSS 支持）、tomcat-embed 10.1.20 | 升级到 3.2.12+ / 3.3.x |
+| 依赖版本 | 已升到 Spring Boot **3.2.12**（3.2 线最后一版，含 spring-web/tomcat CVE 修复）；但 3.2.x 整条线已停止 OSS 支持 | 若要继续跟进：3.3/3.4 属于小版本迁移（MyBatis-Starter、Redisson、Flyway 需同步验证）；4.x 是更大的迁移（Spring Framework 7 / 模块化），建议单独开分支做 |
 | Redis 故障期首请求仍有 ~0.5s | 熔断把"每个请求都等超时"变成"只等一次"：首次失败仍要等一次连接/命令超时（已把 Redisson 调成 `timeout/connectTimeout=2s`、`retryAttempts=1`、`retryInterval=500ms`） | 若还要更低：把 `redis.timeout` 调到 500ms 级，或让熔断对"连接被拒"这类错误单独更快触发 |
 | 打包与运行互斥 | 应用从 jar 运行时 `mvnw clean package` 会失败（Windows 文件占用） | 先停应用再打包；或用容器内构建 |
 
