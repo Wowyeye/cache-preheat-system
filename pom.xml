@@ -23,7 +23,10 @@
         <java.version>17</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <redisson.version>3.27.2</redisson.version>
-        <testcontainers.version>1.19.7</testcontainers.version>
+        <!-- Testcontainers：1.19.7 与 Docker Engine 29.x 的 API 协商有问题（/info 直接返回 400，
+             在 Windows + Docker Desktop 4.9x 上表现为"Could not find a valid Docker environment"），
+             故升到 1.21.4 -->
+        <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
 
     <dependencies>
@@ -114,23 +117,18 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Testcontainers：集成测试用真实 MySQL + Redis 容器（无 Docker 环境自动跳过） -->
+        <!-- Testcontainers：集成测试用真实容器（无 Docker 环境自动跳过） -->
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${testcontainers.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- MySQL 容器：预留给后续"数据库层集成测试"（当前 RedisLayerIT 只用 GenericContainer） -->
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>mysql</artifactId>
             <version>${testcontainers.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.redis</groupId>
-            <artifactId>testcontainers-redis</artifactId>
-            <version>2.2.2</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

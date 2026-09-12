@@ -48,7 +48,12 @@ services:
       - "16379:6379"   # 宿主机 16379，避免与本机 Windows Redis 6379 冲突
 
   app:
-    build: .
+    build:
+      context: .
+      # 国内网络可将 Maven 换源（见 .env.example；留空则走官方源）
+      args:
+        MVNW_REPOURL: ${MVNW_REPOURL:-}
+        MAVEN_MIRROR_URL: ${MAVEN_MIRROR_URL:-}
     container_name: cache-app
     restart: unless-stopped
     depends_on:

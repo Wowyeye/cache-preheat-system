@@ -1,0 +1,27 @@
+# ============================================================
+# 构建上下文排除清单（v3.1 新增）
+# 目的：真实密码与无关大文件绝不进入 docker build 上下文
+#   - .env              本机真实密码（.gitignore 只挡 git，挡不住 docker build）
+#   - target / logs    构建产物与运行日志，额外几十 MB
+#   - .git             git 历史（体积大，且历史里不该外传）
+#   - .temp / .idea    本地临时文件与 IDE 配置
+# ============================================================
+.env
+.env.*
+!.env.example
+local-secret.txt
+
+target/
+logs/
+*.log
+
+.git/
+.gitignore
+
+.temp/
+.idea/
+*.iml
+
+Dockerfile
+docker-compose.yml
+README.md

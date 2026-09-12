@@ -8,11 +8,26 @@
 FROM eclipse-temurin:21-jdk-jammy AS builder
 WORKDIR /build
 
+# 国内网络下 repo.maven.apache.org 常常拉不动，所以把"换源"做成构建参数（默认空 = 官方源，保持可移植）：
+#   MVNW_REPOURL     : Maven Wrapper 分发包仓库前缀（wrapper 官方支持，会拼在 /org/apache/maven/ 之前）
+#   MAVEN_MIRROR_URL : 依赖仓库镜像（写入 builder 阶段的 ~/.m2/settings.xml）
+# 用法：docker compose build --build-arg MVNW_REPOURL=... --build-arg MAVEN_MIRROR_URL=...
+# 或直接写进 .env（compose 会自动读取），见 .env.example
+ARG MVNW_REPOURL=""
+ARG MAVEN_MIRROR_URL=""
+ENV MVNW_REPOURL=${MVNW_REPOURL}
+
 # 先只拷 pom：依赖层不变时命中缓存，改代码不重新下载依赖
 COPY pom.xml .
 COPY .mvn .mvn
 COPY mvnw .
-RUN chmod +x mvnw && ./mvnw -q dependency:go-offline -DskipTests
+RUN set -e; \
+    if [ -n "$MAVEN_MIRROR_URL" ]; then \
+        mkdir -p /root/.m2; \
+        printf '%s\n' "<settings><mirrors><mirror><id>mirror</id><mirrorOf>*</mirrorOf><url>$MAVEN_MIRROR_URL</url></mirror></mirrors></settings>" > /root/.m2/settings.xml; \
+    fi; \
+    printf '[build] MVNW_REPOURL=%s  MAVEN_MIRROR_URL=%s\n' "${MVNW_REPOURL:-<official>}" "${MAVEN_MIRROR_URL:-<official>}"; \
+    chmod +x mvnw && ./mvnw -q dependency:go-offline -DskipTests
 
 # 再拷源码打包
 COPY src src
