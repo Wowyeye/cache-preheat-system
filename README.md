@@ -14,30 +14,68 @@ AIGC:
 > Spring Boot 3.2 + Redis 7 + MyBatis + MySQL 8 + Vue3 + ECharts
 > —— 带自动热点识别、可视化监控、订单状态机与多级防并发问题的**工程级**缓存系统
 
-v3 在 v2 基础上完成**四层工程化修复**：修复 3 个🔴阻断级缺陷、7 个🟠架构级缺陷、4 个🟡数据业务级缺陷、6 个🔵工程运维级缺陷，交付**可单测、可集成测试、可容器化部署**的完整工程。
+v3 相对 v2 完成四层工程化改造（15 项：3 🔴 阻断级 / 4 🟠 架构级 / 4 🟡 数据业务级 / 4 🔵 工程运维级）；
+v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明与实现不符 / 真实并发缺陷"。
+
+> **本 README 的写作原则**：写进来的每一条都标了它是"实测验证"还是"仅代码实现"。
+> 未能实测的（如 docker compose 一键启动）如实标注为未验证，不再用"通过"掩盖。
 
 ---
 
-## 一、v2 → v3 改进对照（面试核心）
+## 一、v2 → v3 → v3.1 改进对照（面试核心）
+
+### 1.1 v3：四层工程化修复（15 项）
 
 | 层级 | v2 缺陷 | v3 修复 |
 |------|---------|---------|
-| 🔴 阻断级 | 启动 SQL 无 Flyway 版本化，改表结构靠手改 | Flyway 版本化迁移 `V1__init.sql` + `V2__seed.sql`，启动自动建表 |
+| 🔴 阻断级 | 启动 SQL 无版本化，改表结构靠手改 | Flyway 版本化迁移 `V1__init.sql` + `V2__seed.sql`，启动自动建表 |
 | 🔴 阻断级 | 多实例击穿防护用 JVM synchronized（每实例一把锁） | Redisson 分布式锁（RLock + 看门狗自动续期），全集群一把锁 |
 | 🔴 阻断级 | Redis 一挂商品查询直接 500 | SafeRedisTemplate 降级执行：Redis 弱依赖，挂了自动直查 DB |
-| 🔴 阻断级 | 配置真实密码写死在仓库 | 全部环境变量外置（.env / local-secret.txt 被 .gitignore），仓库零密码 |
+| 🔴 阻断级 | 配置真实密码写死在仓库 | 全部环境变量外置（`.env` 已 gitignore），仓库与 git 历史零密码（已核查） |
 | 🟠 架构级 | KEYS 全库扫描阻塞 Redis 主线程 | SCAN 游标迭代（count=500 分批） |
 | 🟠 架构级 | 热点榜单只增不减、无 TTL、无容量上限 | ZREMRANGEBYRANK 裁剪保头部 + 7 天整体 TTL 兜底 |
-| 🟠 架构级 | 垃圾 ID 可被恶意顶进排行榜（穿透污染） | recordAccess 先查空值标记，确认不存在不进榜 |
+| 🟠 架构级 | 垃圾 ID 可被顶进排行榜（穿透污染） | v3 起：只对"确认存在"的商品记热度（v3.1 修正为正确实现，见 §1.2） |
 | 🟠 架构级 | 待支付订单永久占用库存 | 超时自动取消（状态机式 UPDATE 防并发双回补）+ 定时扫描 |
 | 🟡 数据级 | 订单无状态机校验，非法流转 | 8 态状态机 + 越权校验（403）+ 非法流转（409） |
 | 🟡 数据级 | 防超卖仅靠 Java 层判断 | SQL 原子扣减 `WHERE stock>=qty` + 库存不足回滚 |
-| 🟡 数据级 | 登录无限流 | 固定窗口限流（用户名+IP 双维度，60 秒 5 次，Redis 故障放行） |
-| 🟡 数据级 | member 被序列化成带引号 `"999"` | 统一去引号解析，兼容 v2 遗留数据 |
-| 🔵 工程级 | 零测试 | 33 单测（Mockito）+ 集成测试（Testcontainers 真实 Redis/MySQL，无 Docker 自动跳过） |
-| 🔵 工程级 | 手动部署 | Dockerfile 多阶段 + docker-compose 一键编排 + healthcheck 依赖就绪 |
-| 🔵 工程级 | 前端 CDN 外链 | 6 个资源本地化到 `frontend/vendor/`，离线可用 |
-| 🔵 工程级 | 前端存储型 XSS（用户名直接渲染） | escapeHtml() 转义 + 权限按钮渲染 |
+| 🟡 数据级 | 登录无限流 | 固定窗口限流（用户名+IP 双维度，60 秒 5 次失败，Redis 故障放行） |
+| 🟡 数据级 | member 被序列化成带引号 `"999"` | 读取侧统一去引号解析，兼容 v2 遗留数据 |
+| 🔵 工程级 | 零测试 | 66 单测（Mockito）+ Redis 层集成测试（Testcontainers，无 Docker 自动 skip） |
+| 🔵 工程级 | 手动部署 | Dockerfile 多阶段 + docker-compose 编排 + healthcheck 依赖就绪 |
+| 🔵 工程级 | 前端 CDN 外链 | 6 个资源本地化到 `frontend/vendor/`，离线可用（实测 0 处外链） |
+
+### 1.2 v3.1：实测复核后修掉的 15 项（本轮）
+
+| # | 问题（实测/代码确证） | v3.1 修复 |
+|---|----------------------|-----------|
+| 1 | **自动预热统计从不落库**：`recordStats()` 只被手动预热调用，`autoPreheat()` 不调用 → 监控页"自动预热轮次"恒为 0、时间恒"未执行"（实测 Redis 中 `cache:hotspot:rank:stats` 键不存在，而日志每 60s 都在打"自动预热完成"） | `autoPreheat()` 补记 stats |
+| 2 | **限流阈值实际只有 3 次**：`overLimit()` 检查里也 INCR，失败再 INCR → 每次失败计数 +2，"60 秒 5 次"实测第 4 次就 429 | 检查改为只读 GET；`recordLoginFailure` 才计数；并加 TTL 自愈（EXPIRE 失败不再造成永久 429） |
+| 3 | **热点榜防污染只防"重复访问同一个不存在的 ID"**：新 ID 首次访问照样进榜（实测 999999 以 score 1.0 出现在 `/api/hotspot/rank`），攻击者每次换新 ID 就能灌榜 | 改为"只在确认商品存在后记热度"（缓存命中或回源命中）；顺带省掉热路径一次多余 GET |
+| 4 | 榜单出现非数字脏成员时 `Long.parseLong` 抛异常 → 整个 `/api/hotspot/rank` 500、定时预热整轮作废 | 脏成员跳过并从榜单移除（自愈），记 warn |
+| 5 | **并发双回补（TOCTOU）**：`cancel/approveRefund/approveReturn` 走"先 checkStatus 再无 koşullu updateStatus"，两个请求都能通过校验 → 两次 `increaseStock` → 库存虚增 | 全部改条件 UPDATE（`updateStatusIf`），影响 0 行抛 409；**并从 Mapper 接口/XML 中删除无条件 `updateStatus`**，防止被重新用上 |
+| 6 | **超时取消的"逐单隔离"不成立**：整批一个事务，catch 后不会回滚单笔 → "订单已取消、库存只回补一半"会随批量提交 | 改为每单独立事务（TransactionTemplate + REQUIRES_NEW），单笔失败只回滚自己 |
+| 7 | **延迟双删时序错位**：第一次删除发生在事务提交之前，第二次是固定 1.5s 与提交时刻无关 → 并发读可在窗口内读旧值回写，脏缓存活到 TTL | 失效动作后置到 `afterCommit`；第二次删除改为延迟调度（不再用工作线程 sleep，消除队列满 CallerRuns 阻塞业务线程）；首删失败也计入指标 |
+| 8 | `DELETE /api/product/{不存在的id}` 返回 200"删除成功"；`PUT` 同理 | 受影响行数为 0 → 404 |
+| 9 | POST 打到只读接口、`?page=abc` 类型错误都被兜底成 **500** | 补 405 / 400 专门处理（方法不支持、参数类型错、缺参、请求体不可读） |
+| 10 | 未登录访问管理接口返回 **403**（与写请求的 401 不一致） | `UserContext.requireAdmin()`：未登录 401、非管理员 403 |
+| 11 | **Redis 类型白名单形同虚设**：`allowIfBaseType(Object.class)` 与子类型白名单是 OR 关系，缓存值基类型恰是 Object → 实测 `java.io.File` 可正常反序列化 | 去掉该规则、补齐 `java.math.`（BigDecimal），白名单真正生效；新增 `RedisSerializationTest` 固化（放行真实类型 + 拒绝白名单外类型） |
+| 12 | `view_count` 永不更新（`incrementViewCount` 无调用点），而启动预热按 `view_count DESC` 排序 → 预热永远是同一批种子商品 | 回源命中（真的读到 DB）时累加浏览量 |
+| 13 | 无 `.dockerignore`：`.env`（真实密码）、`target`、`logs`、`.git` 全进构建上下文 | 新增 `.dockerignore` |
+| 14 | 集成测试"跑过"是假象：无 Docker 时报告 `Tests run: 0, Skipped: 0`（连 skip 都不计，等于静默消失）；且它不加载 Spring、不含 MySQL/Flyway，验的还是测试自建的序列化配置 | 改为 `@Testcontainers(disabledWithoutDocker = true)`（无 Docker 时**如实 skip**）+ 直接使用生产 `RedisConfig` 的序列化器；类名改为 `RedisLayerIT` 并写明覆盖边界 |
+| 15 | README 6 处声明与实测相反（同源托管、自动预热轮次、5 次限流、防污染、member 引号、白名单） | 全部按实测改写；本文档新增"实测验证"标注 |
+
+### 1.3 v3.2：接上 Docker 后补掉的两条"未验证" + 一处环境兼容
+
+| # | 事项 | 处理 |
+|---|------|------|
+| 1 | `docker compose up -d --build` 从未跑通（旧记录：本机无 docker CLI、镜像拉取断流） | 本机装 Docker Desktop 4.90 后**实测跑通**：三容器齐起 + 容器内 Flyway 从零建库 + 应用 health=UP（详见 §9.1-B） |
+| 2 | "前端同源托管 8083"只写在文档里，从未验证过（本地 jar 一直是 404） | 在 Docker 部署上**实测 8 个页面 + 6 个 vendor 资源全部 200**；同时保留"本地 jar 不含前端"的说明 |
+| 3 | 集成测试从未真正执行（无 Docker 时报告 `Tests run: 0`） | Testcontainers **实测真跑**：Ryuk + `redis:7-alpine` 起容器，`RedisLayerIT` 4/4 通过 |
+| 4 | 镜像内 Maven 构建在国内必卡（`repo.maven.apache.org` 拉不动） | `Dockerfile` 增加 `MVNW_REPOURL` / `MAVEN_MIRROR_URL` 两个构建参数（默认官方源），compose 从 `.env` 读取；实测走阿里云构建成功 |
+| 5 | Testcontainers 1.19.7 与 Docker Engine 29.x 不兼容（`/info` 返回 400 → "Could not find a valid Docker environment"） | 升到 **1.21.4**；并移除未使用的 `com.redis:testcontainers-redis`（避免与核心包版本混用）；README 记录 Windows 下需指定 `DOCKER_HOST=npipe:////./pipe/dockerDesktopLinuxEngine` |
+| 6 | **Redis 故障期无熔断**：实测 `docker compose stop redis` 后单次商品查询要 **28.8 秒**才降级返回（一次请求串行撞 5 次 Redis 调用，各自等超时） | 新增 `RedisCircuitBreaker`：连续失败达阈值即熔断，期间 `SafeRedisTemplate` / `DistributedLock` / `TokenService` / `RateLimiter` 全部**不发起** Redis 请求直接走降级；同时把 Redisson 的 `timeout/connectTimeout/retryAttempts` 收紧。实测：故障期**首请求 0.56s、后续 24ms**（修复前 28.8s），恢复后探测成功自动关闭熔断 |
+| 7 | **"Redis 无密码可留空"其实是坏的**：`spring.data.redis.password` 解析成空串时，Redisson 会真发一条 `AUTH `，被未启用密码的 Redis 以 `ERR AUTH` 拒绝 → 应用启动失败（DbLayerIT 实测复现） | `RedisConfig` 显式装配 `RedissonClient`：**空串/空白一律按"无密码"处理**，并在这里统一设置 Redisson 超时/重试；DbLayerIT 用的就是一个无密码 Redis 容器，等于给这条路径加了回归测试 |
+| 8 | 数据库层零集成测试：Mapper/XML/Flyway/事务边界全靠手工实测 | 新增 `DbLayerIT`（Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway）：7 项覆盖迁移版本、原子扣减、条件状态更新、下单/取消全链路、**并发双取消只回补一次**、Cache Aside、穿透空标记 |
 
 ---
 
@@ -46,12 +84,12 @@ v3 在 v2 基础上完成**四层工程化修复**：修复 3 个🔴阻断级�
 | 层次 | 技术 |
 |------|------|
 | 后端 | Spring Boot 3.2.5（JDK 17 编译 / 21 运行）|
-| 缓存 | Redis 7（Lettuce 客户端）+ Redisson 3.27.2（分布式锁）|
+| 缓存 | Redis 7（Redisson 3.27.2 提供连接工厂）+ Redisson 分布式锁 |
 | ORM | MyBatis 3.0.3 + MySQL 8.0 + Druid 连接池 |
 | 迁移 | Flyway（数据库版本化）|
 | 前端 | Vue3 + Element Plus + ECharts（本地化，无需构建）|
-| 测试 | JUnit 5 + Mockito + Testcontainers |
-| 部署 | Dockerfile + docker-compose（MySQL8 + Redis7 + 应用）|
+| 测试 | JUnit 5 + Mockito + Awaitility + Testcontainers |
+| 部署 | Dockerfile（多阶段 / 非 root） + docker-compose |
 
 ---
 
@@ -60,70 +98,76 @@ v3 在 v2 基础上完成**四层工程化修复**：修复 3 个🔴阻断级�
 ```
 cache-preheat-system-v3/
 ├── pom.xml                          # 依赖（Redisson/Flyway/Testcontainers）
-├── mvnw / mvnw.cmd                  # Maven Wrapper（JDK21 运行）
-├── Dockerfile                       # 多阶段构建 + 非 root + healthcheck
-├── docker-compose.yml               # MySQL8 + Redis7 + 应用一键编排
-├── .env.example                     # 环境变量样例（真实值复制为 .env，不入库）
-├── .gitignore                       # 忽略 local-secret.txt/.env/logs/target
+├── mvnw / mvnw.cmd                  # Maven Wrapper
+├── Dockerfile                       # 多阶段 + 非 root + healthcheck（构建期把前端复制进 static）
+├── docker-compose.yml               # MySQL8 + Redis7 + 应用
+├── .dockerignore                    # v3.1 新增：.env/target/logs/.git 不进构建上下文
+├── .env.example                     # 环境变量样例（真实值写 .env，已 gitignore）
+├── .gitignore                       # 忽略 .env/.temp/logs/target
 ├── src/main/java/com/jyu/cache/
-│   ├── CacheApplication.java        # 启动类
-│   ├── config/                      # RedisConfig/拦截器/CORS/CacheProperties/SchedulerConfig
+│   ├── config/                      # RedisConfig(白名单)/拦截器/CORS/CacheProperties/调度器
 │   ├── common/                      # Result/DistributedLock/RateLimiter/SafeRedisTemplate/UserContext
-│   ├── controller/                  # Product/Order/Category/HotSpot/Auth 五组 API
-│   ├── service/                     # ProductServiceImpl/OrderService/HotSpotService/CacheStatsService
-│   ├── mapper/                      # ProductMapper/OrderMapper/UserMapper/CategoryMapper
-│   ├── entity/                      # Product/Order/OrderItem/SysUser/Category
+│   ├── controller/                  # Product/Order/OrderAdmin/Category/HotSpot/Auth
+│   ├── service/                     # ProductServiceImpl/OrderService/HotSpotService/DelayDeleteService/CacheStatsService
+│   ├── mapper/ entity/              # 4 个 Mapper + 5 个实体
 │   ├── scheduler/                   # OrderTimeoutScheduler（超时取消）
 │   └── runner/                      # CachePreheatRunner（启动预热）
 ├── src/main/resources/
 │   ├── application.yml              # 全环境变量占位（无真实密码）
-│   ├── mapper/*.xml                 # SQL（原子扣减/状态机更新）
+│   ├── mapper/*.xml                 # SQL（原子扣减 / 条件式状态机更新）
 │   └── db/migration/                # Flyway：V1__init.sql + V2__seed.sql
-├── src/test/java/                   # 33 单测 + 集成测试（无 Docker 自动跳过）
-└── frontend/                        # 8 页面 + vendor 本地化资源
+├── src/test/java/                   # 66 单测 + RedisLayerIT
+└── frontend/                        # 8 页面 + vendor 本地化资源 + js/css
 ```
 
 ---
 
 ## 四、快速启动
 
-### 方式一：Docker Compose 一键部署（推荐演示）
+### 方式一：Docker Compose（推荐演示；⚠️ 见 §九 已知限制）
 
 ```bash
-# 1. 准备环境变量（真实密码写 .env，不入库）
-cp .env.example .env
-# 编辑 .env 填入 MYSQL_ROOT_PASSWORD
-
-# 2. 一键启动（MySQL8 + Redis7 + 应用，Flyway 自动建表+种子数据）
+cp .env.example .env        # 填入 MYSQL_ROOT_PASSWORD 等
 docker compose up -d --build
-
-# 3. 访问
-#    前端页面：  http://localhost:8083/dashboard.html   （应用同源托管）
-#    健康检查：  http://localhost:8083/actuator/health
+# 前端页面：http://localhost:8083/dashboard.html   ← 由镜像内的 static 目录托管
+# 健康检查：http://localhost:8083/actuator/health
 ```
 
-> 说明：MySQL 宿主端口 13306、Redis 宿主端口 16379（避开本机服务）；应用 8083。
+宿主端口：MySQL 13306、Redis 16379、应用 8083（避开本机服务）。
+
+**国内网络先配 Maven 换源**（否则镜像构建会卡在 `wget: Failed to fetch ...apache-maven-3.9.6-bin`）：
+
+```bash
+# 写进 .env（compose 自动读取；.env 已 gitignore 不入库）
+MVNW_REPOURL=https://maven.aliyun.com/repository/public
+MAVEN_MIRROR_URL=https://maven.aliyun.com/repository/public
+```
+这两个变量走 `Dockerfile` 的 build args（默认空 = 官方源，保持可移植），
+`MVNW_REPOURL` 是 Maven Wrapper 官方支持的分发包仓库前缀，`MAVEN_MIRROR_URL` 会写成容器内 `~/.m2/settings.xml` 的 mirror。
+
+> ✅ 本机实测（Windows 11 + Docker Desktop 4.90 / Engine 29.7.2）：`docker compose up -d --build` 三容器全部起来、
+> MySQL/Redis 到 `healthy`、容器内 Flyway 从零建库（`Successfully applied 2 migrations`）、
+> 应用 `health=UP`、**8 个前端页面与 6 个 vendor 资源全部 200**（这条只有 Docker 部署才成立）。
 
 ### 方式二：本地开发（Maven）
 
 ```powershell
-# 1. 准备 JDK21（项目编译目标 17）
 $env:JAVA_HOME = "C:\Program Files\Java\jdk-21"
-$env:Path = "C:\Program Files\Java\jdk-21\bin;$env:Path"
-
-# 2. 配置环境变量（密码不写文件）
 $env:MYSQL_PASSWORD = "你的MySQL密码"
-$env:REDIS_PASSWORD = "你的Redis密码"   # 无密码可留空
+$env:REDIS_PASSWORD = "你的Redis密码"   # 本机 Redis 无密码就留空（v3.2 已修：空串会被正确当成"无密码"，
+                                        #   旧版会把空串当密码发 AUTH 导致启动失败）
 $env:REDIS_DATABASE = "1"               # 避开 v2 使用的 database 0
-
-# 3. 建库（MySQL 8 创建空库即可，Flyway 自动建表）
-#    mysql -u root -p -e "CREATE DATABASE cache_db_v3 CHARACTER SET utf8mb4"
-
-# 4. 启动
 .\mvnw.cmd spring-boot:run
 ```
 
-前端直接浏览器打开 `frontend/dashboard.html`（同源逻辑：部署时走 8083；file:// 打开时兜底 API_BASE=8083，CORS 默认 \* 放行）。
+**前端怎么访问（重要，与旧文档不同）**：
+- 本地用 Maven 打包/运行时，jar 里**不含**前端资源（`src/main/resources/static` 只在 Docker 构建阶段由 `Dockerfile` 生成），
+  所以 `http://127.0.0.1:8083/dashboard.html` 会 **404**（已实测）。
+- 本地请直接用浏览器打开 `frontend/dashboard.html`：页面在 `file://` 协议下会自动把 `API_BASE` 兜底到 `http://127.0.0.1:8083`，CORS 默认 `*` 放行。
+- 只有 Docker 部署时才是"应用同源托管前端"（同源相对路径，无端口硬编码）。
+
+**打包注意**：应用正在从 `target/*.jar` 运行时，`mvnw clean package` 会因 Windows 文件占用失败
+（`spring-boot:repackage` 无法重命名被占用的 jar）。**先停应用再打包**，或打包到别的目录。
 
 ---
 
@@ -131,105 +175,165 @@ $env:REDIS_DATABASE = "1"               # 避开 v2 使用的 database 0
 
 ### 1. Cache Aside 读策略（防击穿）
 ```
-查商品：Redis 命中 -> 返回
-        未命中 -> Redisson 分布式锁(3s) -> 双重检查 -> 查DB -> 写缓存(TTL随机) -> 返回
-        拿锁失败/Redis故障 -> 降级直查 DB（弱依赖）
+查商品：缓存命中(instanceof Product) -> 记热度 -> 返回
+        命中空值标记 -> 返回 null（不记热度）
+        缓存脏值(非 Product) -> 删掉当未命中处理（不让强转异常变 500）
+        未命中 -> Redisson 分布式锁(3s) -> 双重检查 -> 查DB -> 写缓存(TTL随机) -> 记热度+浏览量
+        拿锁失败/Redis故障 -> 降级直查 DB（弱依赖，不 500）
 ```
 
 ### 2. 延迟双删写策略（缓存一致性）
 ```
-更新商品: 更新DB → 删缓存(第1次) → 延迟1.5s → 删缓存(第2次)
+更新商品 / 库存扣减 / 回补：写DB -> 事务提交后 -> 删缓存(第1次) -> 延迟1.5s -> 删缓存(第2次)
 ```
-解决并发读写导致脏缓存；库存扣减/回补同样触发。
+- **第一次删除在 `afterCommit` 执行**（v3.1）：提交前删缓存会让并发读把旧值写回，第二次删除又和提交时刻无关。
+- 第二次删除由 `ScheduledExecutorService` 延迟调度，等待期不占工作线程，也不会反压业务线程。
+- 两次删除的失败都计数（`/api/product/cache/stats` 的 `firstDeleteFailures`/`secondDeleteFailures`），
+  失败不重试，最终一致性由缓存 TTL 兜底。
 
 ### 3. 三大经典防护
 | 防护 | 机制 |
 |------|------|
 | 穿透 | 不存在的 ID 写空值标记（TTL 60s）|
-| 击穿 | Redisson 分布式锁单线程回源 |
-| 雪崩 | TTL + 0~300s 随机值 |
+| 击穿 | Redisson 分布式锁 + 锁内双重检查 |
+| 雪崩 | TTL + 0~300s 随机抖动 |
 
-### 4. 自动热点识别（v2 创新，v3 加固）
+### 4. 自动热点识别
 ```
-访问 → ZINCRBY 热度+1
-每60秒定时 → ZREVRANGE 取 TopN → 查库 → 写缓存 → ZREMRANGEBYRANK 裁剪 + 刷新 TTL
-防污染：命中空值标记的 ID 不进榜；删除商品同步 ZREM
+商品查询（仅当确认商品存在）-> ZINCRBY 热度+1
+每60秒 -> ZREVRANGE 取 TopN -> 查库 -> 写缓存 -> ZREMRANGEBYRANK 裁剪 + 刷新 TTL + 记录本轮统计
+防污染：不存在的 ID 从源头不进榜（只对确认存在的商品记热度）；删除商品同步 ZREM；
+        榜单出现脏成员则跳过并移除，不影响整轮预热
 ```
 
 ### 5. 订单状态机（8 态）
 ```
 PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
-     |--取消--> CANCELLED（回补库存）      |--退款--> REFUNDING -> REFUNDED（回补）
-     |（超时自动取消，回补）                |--退货--> RETURNING -> RETURNED（回补）
+     |--取消--> CANCELLED（回补库存）    |--退款--> REFUNDING -> REFUNDED（回补）
+     |（超时自动取消，回补）              |--退货--> RETURNING -> RETURNED（回补）
 ```
-- 状态流转靠 `updateStatusIf`（WHERE 原状态）原子抢占，防并发双回补
-- 超时扫描 60s 一轮，逐单隔离异常不阻断整批
+- **所有流转都是条件 UPDATE**（`WHERE status = 期望状态`），拿不到流转权（影响 0 行）→ 409，
+  并发下绝不会双回补（v3.1 修复：旧实现只有超时路径是条件更新，用户侧是"先查后无条件改"）。
+- 超时扫描每单一个独立事务，单笔失败只回滚自己。
 
-### 6. 防超卖（原子扣减）
+### 6. 防超卖
 `UPDATE product SET stock = stock - n WHERE id = ? AND stock >= n`，0 行受影响抛 409。
+（实测：库存 5000 的商品下单 999999 件 → HTTP 409，库存不变）
 
 ### 7. 限流（登录）
-固定窗口 60s/5 次，用户名 + IP 双维度计数；Redis 故障放行（不阻断登录主流程）。
+固定窗口 60 秒 **5 次失败**（只读检查 + 失败记账，v3.1 修正后阈值语义与文档一致），
+用户名 + IP 双维度，命中即 429；Redis 故障放行；计数键缺 TTL 时自愈补设。
+
+### 8. Redis 本地熔断（v3.2）
+```
+连续失败达阈值（默认 1）-> 熔断 5s（cache.breaker-*/CACHE_BREAKER_* 可配）
+熔断期间：读路径不发起任何 Redis 请求，直接查 DB；写路径的缓存失效记账跳过
+冷却后：半开，只放行 1 个探测请求 —— 成功则关闭熔断，失败则立刻重新打开
+```
+- 覆盖所有 Redis 触点：`SafeRedisTemplate`（读/写/SCAN/删除）、`DistributedLock`（Redisson 也要等连接重试，是原来 28.8s 里的大头）、`TokenService`（登录态 fail-closed 但要快速失败）、`RateLimiter`（fail-open）。
+- 实测效果：Redis 挂掉后**首请求 0.56s、后续 ~24ms**（无熔断时每次请求都要 28.8s）；恢复后自动关闭熔断。
+- 取舍：阈值默认 1（宁可激进切 DB，也不让用户等超时），因为降级路径永远是"直查 DB"这个正确结果；抖动敏感场景可调大到 3。
 
 ---
 
-## 六、测试矩阵
+## 六、测试矩阵（含真实覆盖边界）
 
-| 层级 | 命令 | 覆盖 |
-|------|------|------|
-| 单元测试 | `.\mvnw.cmd test` | 33 项：状态机/防超卖/超时取消/分布式锁/限流/热点防污染 |
-| 集成测试 | `.\mvnw.cmd verify` | Testcontainers 真实 Redis：Cache Aside/空值标记/延迟双删/ZSet 热点（无 Docker 自动跳过） |
-| 构建 | `.\mvnw.cmd clean package` | 可执行 jar + 前后端同源打包 |
+| 层级 | 命令 | 覆盖 | 状态 |
+|------|------|------|------|
+| 单元测试 | `.\mvnw.cmd test` | **78 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机 | ✅ 实测全绿（BUILD SUCCESS） |
+| Redis 层集成测试 | `.\mvnw.cmd verify` | Testcontainers 真实 `redis:7-alpine` 容器：生产序列化配置往返、空哨兵值、SCAN、ZSet 热度 | ✅ **实测真跑通过**（4/4，无 Docker 时如实 skip） |
+| 数据库层集成测试 | `.\mvnw.cmd verify` | `DbLayerIT`：Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway：迁移版本/原子扣减/条件状态更新/下单取消全链路/**并发双取消只回补一次**/Cache Aside/穿透标记 | ✅ **实测真跑通过**（7/7，无 Docker 时如实 skip） |
+| 构建 | `.\mvnw.cmd clean package` | 可执行 fat jar | ✅ 实测（58 MB / `BOOT-INF/lib` 89 项）；**需先停掉正在运行的实例**（Windows 文件占用） |
 
-> Windows 本机无 Docker 时集成测试 assumption 跳过，`mvn verify` 仍全绿。
+> **环境提示 A**：若 `mvn test` 出现 `MockitoInitializationException: Could not self-attach to current VM`，
+> 是 JDK 21 + 受限环境不允许 agent 自附加，加 `-DargLine=-Djdk.attach.allowAttachSelf=true` 即可。
+>
+> **环境提示 B（Windows + Docker Desktop 跑 IT 必需）**：
+> ① Testcontainers 1.19.7 与 Docker Engine 29.x 的 API 协商会失败（`/info` 直接 400，报"Could not find a valid Docker environment"），本项目已升到 **1.21.4**；
+> ② Testcontainers 默认找 `npipe://./pipe/docker_engine`，而 Docker Desktop 4.9x 的引擎管道叫 `dockerDesktopLinuxEngine`，需要显式指定：
+> ```powershell
+> $env:DOCKER_HOST = 'npipe:////./pipe/dockerDesktopLinuxEngine'
+> mvn verify "-DargLine=-Djdk.attach.allowAttachSelf=true"
+> ```
 
 ---
 
 ## 七、面试要点速览
 
-1. **为什么用 Redisson 而不是自己写 SETNX 锁？** 看门狗自动续期防死锁、可重入、高可用集群支持。
-2. **延迟双删为什么延迟 1.5s？** 等读线程把旧缓存写完再删，消除读写竞争窗口。
-3. **SCAN vs KEYS？** KEYS 全库 O(N) 阻塞主线程；SCAN 游标增量分批，不阻塞。
-4. **空值缓存为什么 TTL 更短（60s）？** 防穿透同时也防"误标记"长期生效。
-5. **超时取消如何防并发双回补？** `updateStatusIf` 只影响"待支付"状态的行，谁先改成功谁回补。
-6. **Redis 挂了系统还能用吗？** 能——SafeRedisTemplate 降级直查 DB，只损失缓存性能。
-7. **多实例部署缓存一致性问题？** 每实例本地锁失效，Redisson 分布式锁 + 延迟双删兜底。
+1. **为什么用 Redisson 而不是自己写 SETNX 锁？** 看门狗自动续期防死锁、可重入、集群支持。
+2. **延迟双删为什么延迟 1.5s？** 等读线程把旧缓存写完再删；**更关键的是第一次删除必须等事务提交后**。
+3. **SCAN vs KEYS？** KEYS 全库 O(N) 阻塞主线程；SCAN 游标增量分批。
+4. **空值缓存为什么 TTL 更短（60s）？** 防穿透，同时防"误标记"长期生效。
+5. **并发下怎么保证库存不被双回补？** 状态流转一律条件 UPDATE（影响行数=0 即放弃回补），而不是"先查状态再改"。
+6. **热点榜怎么防垃圾 ID 灌榜？** 只有在确认商品存在（缓存命中/回源命中）时才记热度，垃圾 ID 从源头进不来。
+7. **Redis 挂了系统还能用吗？** 能——SafeRedisTemplate 把 Redis 降为弱依赖，读路径降级直查 DB（单元测试覆盖；停 Redis 可现场演示）。
+8. **Redis 反序列化的安全边界？** 关闭 LaissezFaire 多态放行 → 子类型前缀白名单；注意 `allowIfBaseType(Object.class)` 会让白名单失效（本项目的实测教训）。
 
 ---
 
-## 八、演示流程（面试 5 分钟版）
+## 八、演示流程（5 分钟版）
 
-1. `docker compose up -d --build` 一键起三容器
-2. 登录（`admin/admin123`）→ 商品管理页模拟访问热点商品
-3. 观察热点排行分数变化 + 自动预热轮次 +1
-4. 打开监控大盘：命中率环形图、缓存 vs 数据库耗时对比实验
-5. 演示防超卖：库存 5 的商品并发下单 6 笔 → 第 6 笔 409
-6. 演示订单超时：下单后不支付，30 分钟（可配 ORDER_TIMEOUT_MINUTES=1）自动取消回补库存
-7. 断 Redis 容器 `docker stop cache-redis` → 商品查询仍正常（降级直查 DB），恢复后自动预热
-
----
-
-## 九、v1 → v2 → v3 演进
-
-| 维度 | v1 | v2 | v3 |
-|------|----|----|----|
-| Spring Boot | 2.7（javax）| 3.2（jakarta）| 3.2.5 |
-| 锁 | 本地 synchronized | 本地 synchronized | Redisson 分布式锁 |
-| Redis 操作 | 直接 template | 直接 template | SafeRedisTemplate 降级 |
-| 建表 | 手动 SQL | 手动 SQL | Flyway 版本化 |
-| 测试 | 无 | 无 | 33 单测 + Testcontainers |
-| 部署 | 手动 | 手动 | Docker Compose + healthcheck |
-| 密码 | 硬编码 | 环境变量 | 环境变量 + .env 不提交 |
+1. `docker compose up -d --build`（国内先按 §四 配好 Maven 换源与镜像源），等三容器 healthy
+2. 浏览器打开 **`http://localhost:8083/login.html`**（Docker 部署下页面由应用同源托管），用 `admin/admin123` 登录
+   - 若走本地模式（方式二），页面请直接打开 `frontend/login.html`
+3. 商城页反复访问同一商品 → 热点排行页分数上升；监控大盘"自动预热轮次"**每 60s +1**
+4. 监控大盘：命中率、缓存 vs 数据库耗时对比
+5. 防超卖：库存不足时下单 → 409
+6. 订单超时：下单不支付，超时（`.env` 里把 `ORDER_TIMEOUT_MINUTES` 设为 1）自动取消并回补库存
+7. 断 Redis：`docker compose stop redis` → 商品查询仍可用（降级直查 DB，`degradeCount` 上升），`start` 后自动预热
 
 ---
 
-## 十、已知限制与实测说明
+## 九、已知限制与实测说明
 
-| 项 | 状态 | 说明 |
+### 9.1 实测记录
+
+**A. 本地模式**（Windows + 原生 MySQL 8（3306）+ 原生 Redis 7（6379，带密码）+ JDK 21）
+
+| 项 | 状态 | 证据 |
 |----|------|------|
-| 本机全链路实测（Windows MySQL80 + Redis） | ✅ 通过 | 登录 / 商品缓存 / 防超卖（409）/ 订单超时自动取消 / 限流（429）均验证 |
-| 单元测试 | ✅ 通过 | 33 项全绿（`mvn verify` BUILD SUCCESS） |
-| Docker Compose 一键启动 | ⚠️ 待稳定网络环境验证 | WSL Docker（29.1.3）实测：redis:7-alpine、eclipse-temurin:21-jre-jammy（经 1ms 镜像源）拉取成功；**mysql:8.0 大盘镜像多次拉取持续断流**（官方源与 1ms 源均超时），compose 全链路未在本机跑通 |
-| 集成测试（Testcontainers） | ✅ 就绪 | 无 Docker 环境自动跳过（assumption），不影响 `mvn verify` 通过 |
+| 33 → 78 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
+| fat jar 构建 | ✅ 通过 | 58,453,755 B，`BOOT-INF/lib` 89 项 |
+| 登录 / 权限矩阵 | ✅ 通过 | `admin/admin123` 登录 200；普通用户访问管理接口 403；未登录管理接口 401；无效 token 401 |
+| Cache Aside 命中 | ✅ 通过 | 二次查询走缓存；统计 hit/miss、缓存 4.86ms vs DB 14.03ms |
+| 穿透防护 | ✅ 通过 | 查不存在 ID：首次 miss+1，二次 hit+1（命中空值标记，未打库） |
+| 防超卖 | ✅ 通过 | 库存 5000 下单 999999 件 → 409，库存不变 |
+| 限流 | ✅ 通过（修正后） | 修正前实测第 4 次 429（阈值被算成 3）；修正后实测 5 次 401 后第 6 次 429 |
+| 订单超时自动取消 | ✅ 通过（全链路） | 阈值设 1 分钟：下单 → 库存 5000→4999 → 调度器 60s 内取消 → 状态 `CANCELLED` + 库存回 5000 |
+| 热点榜防污染 | ✅ 通过 | 不存在的 888777 查询后**不在榜**；真实商品访问正常加分（1→3） |
+| 自动预热统计 | ✅ 通过 | `autoPreheatRounds` 随 60s 轮次递增（修正前恒为 0） |
+| view_count | ✅ 通过 | 回源命中后 75210 → 75211 |
+| 前端资源本地化 | ✅ 通过 | 8 个页面内 `https?://` 命中 0，6 个 vendor 文件齐全 |
+| Redis 宕机降级 | ✅ 可用性 + 延迟都通过 | 实测 `docker compose stop redis`：商品详情**返回 200**（降级直查 DB），故障期**首请求 0.56s、后续 ~24ms**（v3.2 加熔断前是单请求 28.8s）；恢复后 23ms，日志可见"探测成功，Redis 恢复正常，关闭熔断" |
 
-> 若在稳定 Docker 网络环境部署，按"方式一"执行 `docker compose up -d --build` 即可；镜像拉取慢时可预先用国内镜像源（如 `docker.1ms.run/library/`）拉好再打 tag。
+**B. Docker 模式**（Windows 11 + Docker Desktop 4.90 / Engine 29.7.2 / compose v5.5.1）
+
+| 项 | 状态 | 证据 |
+|----|------|------|
+| `docker compose up -d --build` 一键启动 | ✅ **通过** | 三容器齐起；`cache-mysql`/`cache-redis` = healthy；`cache-app` health=UP |
+| 容器内 Flyway 从零建库 | ✅ 通过 | `Migrating schema cache_db_v3 to version "1 - init"` → `"2 - seed"` → `Successfully applied 2 migrations` |
+| **前端同源托管 8083** | ✅ **通过** | 8 个页面 200（dashboard/login/mall/products/my-orders/admin-orders/hotspot/compare）+ vendor 资源 200（本地 jar 时这些是 404） |
+| 容器内 API 冒烟 | ✅ 通过 | 登录 200、商品查询命中启动预热（hit=1）、启动预热 10 条、`autoPreheatRounds` 递增 |
+| Testcontainers 集成测试 | ✅ **通过** | Ryuk + `redis:7-alpine` 真实启动，`RedisLayerIT` 4/4 通过（0 跳过） |
+| **数据库层集成测试** | ✅ **通过** | `DbLayerIT`：真实 `mysql:8.0` + `redis:7-alpine` 容器 + 完整 Spring 上下文，**7/7 通过**（含 Flyway 迁移版本、原子扣减、条件状态更新、并发双取消只回补一次） |
+| 镜像构建换源 | ✅ 通过 | `MVNW_REPOURL` + `MAVEN_MIRROR_URL` 指向阿里云后，镜像内 Maven 构建成功 |
+
+### 9.2 已知限制（未修，属取舍或待办）
+
+| 项 | 说明 | 建议 |
+|----|------|------|
+| 本地 jar 不含前端 | 同源托管只在 Docker 镜像内成立；本地 8083 访问页面 404（已实测对比） | 若要在本地也托管，把 `frontend/*` 复制进 `src/main/resources/static` 后再打包 |
+| Docker 构建依赖网络 | 基础镜像 `mysql:8.0`/`temurin` 在国内可能拉不动（本项目实测用过 `docker.1ms.run` 镜像源拉取后 `docker tag` 回官方名）；Maven 换源见 §四 | 稳定网络或预先拉好镜像 + 配 `registry-mirrors` |
+| X-Forwarded-For 无条件信任 | `AuthController.clientIp()` 优先取该头 → 伪造头部即可换 IP 维度计数绕过 IP 限流 | 部署时由网关/负载均衡覆盖该头，或改为只信任已知代理 |
+| 缓存统计与 Actuator 匿名可读 | `GET /api/product/cache/stats`、`/actuator/health,info,metrics` 无鉴权（监控大盘对游客开放，属演示取舍） | 生产建议加鉴权或把暴露端点收窄到 `health` |
+| 下架商品仍可被读路径命中 | 读缓存/回源不校验 `status`，`status=0` 的商品仍能查到并回写缓存（仅启动预热按 `status=1` 过滤） | 若要下架即不可见，需在读路径加 status 判断并同步清理缓存 |
+| 一致性依赖双删 + TTL | 删除失败只计数不重试，无 binlog/MQ 补偿；极端情况下脏数据靠 TTL（1800s）收敛 | 上量后引入 binlog 订阅或消息驱动失效，并给 key 加版本号 |
+| 种子弱口令 | `admin/admin123`、`user1|user2/123456` 随仓库发布 | 公开仓库前移除种子账号或强制首登改密 |
+| 依赖版本偏旧 | Spring Boot 3.2.5（3.2.x 已停止 OSS 支持）、tomcat-embed 10.1.20 | 升级到 3.2.12+ / 3.3.x |
+| Redis 故障期首请求仍有 ~0.5s | 熔断把"每个请求都等超时"变成"只等一次"：首次失败仍要等一次连接/命令超时（已把 Redisson 调成 `timeout/connectTimeout=2s`、`retryAttempts=1`、`retryInterval=500ms`） | 若还要更低：把 `redis.timeout` 调到 500ms 级，或让熔断对"连接被拒"这类错误单独更快触发 |
+| 打包与运行互斥 | 应用从 jar 运行时 `mvnw clean package` 会失败（Windows 文件占用） | 先停应用再打包；或用容器内构建 |
+
+> **一句话总结**：v3 把 v2 的"架构级缺陷"补成了工程实现，v3.1 把"实现与声明"之间的差距补平了，
+> v3.2 又把"只有文档、没有实测证据"的两条（compose 一键部署、Testcontainers 集成测试）真正跑通了。
+> 当前状态是**可运行、可测试、可一键部署、且每一条声明都能指出证据来源**；
+> 剩下的是真正的深水区：DB 层集成测试、限流/鉴权的边界加固、以及一致性从"双删 + TTL"升级到 binlog/消息驱动。
