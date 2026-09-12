@@ -21,7 +21,8 @@ import java.util.Map;
  *   POST   /api/product               新增商品（ADMIN）
  *   PUT    /api/product               更新商品（ADMIN，触发延迟双删）
  *   DELETE /api/product/{id}          删除商品（ADMIN，触发延迟双删 + 榜单清理）
- *   GET    /api/product/cache/stats   缓存统计信息
+ *   GET    /api/product/cache/summary 缓存摘要（公开：命中率/耗时等演示指标）
+ *   GET    /api/product/cache/stats   缓存完整统计（ADMIN：含 key 数、降级/删失败计数）
  *   DELETE /api/product/cache/all     清除所有缓存（ADMIN，SCAN）
  *   DELETE /api/product/cache/{id}    清除指定商品缓存（ADMIN）
  *   POST   /api/product/preheat       手动触发缓存预热（ADMIN）
@@ -83,8 +84,16 @@ public class ProductController {
         return Result.success("删除成功，已触发延迟双删策略", null);
     }
 
+    /** 公开摘要：命中率、命中/未命中、缓存 vs DB 耗时（游客可见，供监控大盘/耗时对比页） */
+    @GetMapping("/cache/summary")
+    public Result<Map<String, Object>> cacheSummary() {
+        return Result.success(productService.getCacheSummary());
+    }
+
+    /** 完整统计：额外含缓存 key 数、降级次数、双删失败次数等内部运维指标 -> 仅管理员 */
     @GetMapping("/cache/stats")
     public Result<Map<String, Object>> cacheStats() {
+        UserContext.requireAdmin();
         return Result.success(productService.getCacheStats());
     }
 

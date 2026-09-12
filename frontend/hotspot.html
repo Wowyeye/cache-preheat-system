@@ -47,7 +47,7 @@
             <div class="panel-title">
                 <span>实时热度排行榜（ZSet 实时分数）</span>
                 <span class="tools">
-                    <el-button size="small" type="primary" @click="manualPreheat">立即预热 TopN</el-button>
+                    <el-button v-if="isAdminUser" size="small" type="primary" @click="manualPreheat">立即预热 TopN</el-button>
                     <el-button size="small" @click="loadRank">刷新</el-button>
                 </span>
             </div>
@@ -82,6 +82,8 @@
     const app = createApp({
         setup() {
             const state = reactive({ rankList: [], autoStats: { lastPreheatCount: 0, lastPreheatTime: '未执行', autoPreheatRounds: 0 } });
+            // 手动预热是管理员操作（会对缓存写入），非管理员不展示按钮
+            const isAdminUser = isAdmin();
             let chart = null;
 
             async function loadRank() {
@@ -136,7 +138,7 @@
             return {
                 get rankList() { return state.rankList; },
                 get autoStats() { return state.autoStats; },
-                loadRank, manualPreheat
+                isAdminUser, loadRank, manualPreheat
             };
         }
     });

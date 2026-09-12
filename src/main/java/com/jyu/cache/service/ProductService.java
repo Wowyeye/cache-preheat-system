@@ -56,8 +56,15 @@ public interface ProductService {
 
     /**
      * 【缓存监控】获取缓存统计信息（指标存 Redis，多实例聚合）
+     * 含内部运维指标（缓存 key 数、降级/删失败计数），只对管理员开放
      */
     Map<String, Object> getCacheStats();
+
+    /**
+     * 【缓存监控·公开】只读摘要：命中率、命中/未命中次数、缓存 vs DB 耗时
+     * 不含任何内部运维计数，游客可看（监控大盘 / 耗时对比页对游客开放）
+     */
+    Map<String, Object> getCacheSummary();
 
     /**
      * 【缓存监控】手动清除所有商品缓存（SCAN）

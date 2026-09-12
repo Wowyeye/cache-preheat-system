@@ -74,6 +74,8 @@ services:
       REDIS_DATABASE: ${REDIS_DATABASE:-0}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
       ORDER_TIMEOUT_MINUTES: ${ORDER_TIMEOUT_MINUTES:-30}
+      # 可信代理（默认空 = 不信任 X-Forwarded-For；放在 Nginx/网关后面时才需要填）
+      APP_TRUSTED_PROXIES: ${APP_TRUSTED_PROXIES:-}
     ports:
       - "8083:8083"
     volumes:

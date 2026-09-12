@@ -81,16 +81,24 @@ app:
   # 待支付订单超时分钟数（超时自动取消并回补库存）
   order:
     timeout-minutes: ${ORDER_TIMEOUT_MINUTES:30}
+  security:
+    # 可信代理列表（逗号分隔，支持 IPv4 与 CIDR，如 10.0.0.0/8,192.168.1.10）。
+    # 默认空 = 完全不信任 X-Forwarded-For：客户端 IP 一律取 socket 地址，
+    # 这样伪造 X-Forwarded-For 无法绕过"按 IP 维度"的登录限流。
+    # 部署在 Nginx/网关后面时，把网关地址填进来；此时会取 XFF 链上**最右侧的不可信地址**作为客户端 IP。
+    trusted-proxies: ${APP_TRUSTED_PROXIES:}
 
 # ========== Actuator：健康检查与运维端点 ==========
+# 只暴露 health（compose/K8s 探活用）；metrics/info 原本匿名可读，属信息泄露面，这里关掉
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health
   endpoint:
     health:
-      show-details: when_authorized
+      # 无 Spring Security 时 when_authorized 永不放行，等于 never；这里显式写清楚
+      show-details: never
       probes:
         enabled: true   # 暴露 /actuator/health/liveness 与 /readiness（K8s 探针）
   health:

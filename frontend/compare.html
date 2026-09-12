@@ -20,12 +20,13 @@
         <div class="tip-box">
             点击「运行对比实验」，程序会对同一批商品分别发起 <b>N 次缓存请求</b>（命中缓存）和
             <b>N 次回源请求</b>（先清缓存强制回源数据库），统计两组平均耗时并可视化。
+            <br><span class="muted">实验需要清空缓存，因此仅管理员可运行（游客/普通用户可查看全局统计）。</span>
         </div>
 
         <!-- 实验控制 -->
         <div class="panel">
             <div style="display:flex; gap:12px; align-items:center;">
-                <el-button type="primary" :loading="running" @click="runExperiment">运行对比实验</el-button>
+                <el-button type="primary" :loading="running" :disabled="!isAdminUser" @click="runExperiment">运行对比实验</el-button>
                 <el-button @click="clearStats" :disabled="running">重置统计数据</el-button>
                 <span class="muted">实验会交替清缓存/写缓存，数据为真实测量值</span>
             </div>
@@ -87,10 +88,16 @@
                 running: false, result: null,
                 globalStats: { totalRequests: 0, hitCount: 0, missCount: 0, hitRate: '--', cacheAvgMs: 0, dbAvgMs: 0 }
             });
+            const isAdminUser = isAdmin();
             let chartAvg = null, chartSeries = null;
 
             /** 运行对比实验：清缓存后请求（回源）→ 写回缓存后请求（命中），各 N 次 */
             async function runExperiment() {
+                // 实验会调用"清空缓存"这类管理员接口，游客/普通用户给明确提示而不是报 403
+                if (!isAdminUser) {
+                    showToast('该实验需要管理员权限（会清空缓存后重新回源）', 'warning');
+                    return;
+                }
                 state.running = true;
                 try {
                     const testIds = [1, 2, 3, 4, 5];
@@ -146,7 +153,8 @@
 
             async function loadGlobal() {
                 try {
-                    const data = await apiGet('/api/product/cache/stats');
+                    // 公开摘要接口：命中率/耗时对所有人开放，内部运维计数不对游客暴露
+                    const data = await apiGet('/api/product/cache/summary');
                     Object.assign(state.globalStats, data);
                 } catch (e) { /* 静默 */ }
             }
@@ -196,7 +204,7 @@
                 get running() { return state.running; },
                 get result() { return state.result; },
                 get globalStats() { return state.globalStats; },
-                runExperiment, clearStats
+                isAdminUser, runExperiment, clearStats
             };
         }
     });

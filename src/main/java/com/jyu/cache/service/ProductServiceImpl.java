@@ -308,4 +308,25 @@ public class ProductServiceImpl implements ProductService {
         delayDeleteService.evictWithDelay(buildKey(id));
         log.info("[订单联动] 商品 {} 库存已变更，触发延迟双删失效缓存", id);
     }
+
+    /** 公开摘要：只暴露演示需要的性能指标，内部运维计数（key 数/降级/删失败）留给管理员接口 */
+    private static final List<String> PUBLIC_STAT_KEYS = List.of(
+            "hitCount", "missCount", "totalRequests", "hitRate",
+            "cacheAvgMs", "dbAvgMs", "cachePathCount", "dbPathCount", "productTotal");
+
+    @Override
+    public Map<String, Object> getCacheSummary() {
+        Map<String, Object> full = getCacheStats();
+        Map<String, Object> summary = new HashMap<>(PUBLIC_STAT_KEYS.size() * 2);
+        for (String key : PUBLIC_STAT_KEYS) {
+            if (full.containsKey(key)) {
+                summary.put(key, full.get(key));
+            }
+        }
+        // 降级状态本身不敏感，但"处于降级"这件事对演示页有用
+        if (full.containsKey("degraded")) {
+            summary.put("degraded", full.get("degraded"));
+        }
+        return summary;
+    }
 }

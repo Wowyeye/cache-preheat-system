@@ -29,8 +29,8 @@
             </div>
             <div class="stat-card">
                 <div class="label">缓存 key 数量</div>
-                <div class="value">{{ stats.cacheKeyCount }}</div>
-                <div class="extra">Redis 中商品缓存条数</div>
+                <div class="value">{{ isAdminUser ? stats.cacheKeyCount : '—' }}</div>
+                <div class="extra">{{ isAdminUser ? 'Redis 中商品缓存条数' : '仅管理员可见' }}</div>
             </div>
             <div class="stat-card">
                 <div class="label">商品总数</div>
@@ -56,8 +56,8 @@
             </div>
         </div>
 
-        <!-- 操作区 -->
-        <div class="panel">
+        <!-- 操作区（缓存运维属管理员操作，非管理员不展示） -->
+        <div class="panel" v-if="isAdminUser">
             <div class="panel-title">
                 <span>缓存运维操作</span>
                 <span class="tools">
@@ -68,6 +68,16 @@
             <div class="tip-box">
                 监控大盘每 5 秒自动刷新统计数据。自动热点预热每 60 秒执行一轮：从 Redis ZSet 热度排行榜取 TopN 商品，
                 自动加载到缓存——这就是「热点自动发现 → 缓存自动跟上」的闭环。
+            </div>
+            <span class="muted" id="lastRefreshText">最近刷新：--</span>
+        </div>
+
+        <!-- 游客/普通用户视角：只读摘要 + 说明 -->
+        <div class="panel" v-else>
+            <div class="panel-title">只读视图</div>
+            <div class="tip-box">
+                命中率与耗时对比对所有人开放；<b>缓存 key 数、降级次数、双删失败次数</b>等内部运维指标
+                以及预热/清缓存操作需要管理员账号（<code>admin/admin123</code>）。
             </div>
             <span class="muted" id="lastRefreshText">最近刷新：--</span>
         </div>
@@ -87,13 +97,15 @@
             });
             const autoStats = reactive({ lastPreheatCount: 0, lastPreheatTime: '未执行', autoPreheatRounds: 0 });
             const lastRefresh = { text: '' };
+            // 管理员看完整统计（含内部运维计数），其他人只能拿公开摘要
+            const isAdminUser = isAdmin();
             let chartHit = null, chartPath = null;
 
             // 简单容器对象（仅记录最近刷新时间，手动更新 DOM 文本）
 
             async function loadStats() {
                 try {
-                    const data = await apiGet('/api/product/cache/stats');
+                    const data = await apiGet(isAdminUser ? '/api/product/cache/stats' : '/api/product/cache/summary');
                     Object.assign(stats, data);
                     // "85.71%" -> 85.71，便于模板里判断颜色
                     stats.hitRateNum = parseFloat(stats.hitRate);
@@ -173,7 +185,7 @@
                 setInterval(loadAutoStats, 10000);
             });
 
-            return { stats, autoStats, preheat, clearAll };
+            return { stats, autoStats, preheat, clearAll, isAdminUser };
         }
     });
     app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
