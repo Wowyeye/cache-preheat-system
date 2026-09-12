@@ -85,6 +85,22 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 > A 跑完立刻放锁，B 十秒后触发又抢到这把空锁，一轮被跑了两次（130 秒 +5 轮）。
 > 改成"**持有租约到本轮结束、不主动释放**"（ShedLock 的思路）后才真正互斥。
 
+### 1.5 v3.4：可观测性与一致性再升级
+
+| # | 事项 | 处理 |
+|---|------|------|
+| 1 | 接口文档靠翻 README，联调/答辩成本高 | 接入 **springdoc OpenAPI**：`/swagger-ui.html` 可点着调，`/v3/api-docs` 是规范 JSON；30 个接口全部带中文 summary，ADMIN 接口标注 `@SecurityRequirement`；实测 **28 个路径 / 6 个 Tag** |
+| 2 | 指标只有自研 Redis 统计（非标准协议，Prometheus/Grafana 抓不到，也没有分位数） | 接入 **Micrometer → `/actuator/prometheus`**：`cache_access_total{result=hit\|miss\|null_hit\|degrade\|lock_fallback}`、`cache_path_seconds{path=cache\|db}`（自带 p50/p95/p99）、`cache_circuit_open`、`cache_delete_failures{phase}`、`cache_evict_retry*`；与 JVM/HTTP/连接池指标并列，可直接拼 Grafana 看板 |
+| 3 | 下单无频率限制（唯一有"写放大"的入口：扣库存 + 写订单表） | 复用 `RateLimiter` 增加用户维度限流：**60 秒 10 单**，Redis 故障放行。实测同一用户连下 12 单 → `200×10 + 429×2` |
+| 4 | **失效失败只记日志 + 计数**，脏数据只能等 TTL（1800s）收敛——一致性上最大的一块缺口 | 新增 `EvictRetryQueue`：失败即入队，指数退避重试（2s→4s→8s→16s→32s→60s，最多 6 次），**熔断期间不消耗重试次数**，成功/耗尽/丢弃都有指标；`/api/product/cache/stats` 增加 `evictRetryPending/Success/Exhausted` |
+
+> 一致性这条的**边界**要说清楚：
+> ① 重试队列是**进程内**的（失效失败往往正是 Redis 不可用，此时往 Redis 里塞任务同样会失败；写路径发生在哪个实例，就由哪个实例记着）。
+>    实例被 `kill -9` 会丢队列，此时仍有 TTL 兜底；跨实例共享队列需要外部存储，属于下一步（配合 binlog/CDC）。
+> ② 另一个实测发现：**Redis 宕机时鉴权是 fail-closed，所有需要登录的接口都不可用**（读接口仍能降级），
+>    所以"失效失败"最现实的触发场景是 Redis **抖动/瞬时故障**，而不是长时间宕机。
+>    这正是不该把登录态存在 Redis 的理由 —— 生产上更倾向无状态 JWT（见 §9.2）。
+
 ---
 
 ## 二、技术栈
@@ -95,8 +111,11 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 | 缓存 | Redis 7（Redisson 3.27.2 提供连接工厂）+ Redisson 分布式锁 |
 | ORM | MyBatis 3.0.3 + MySQL 8.0 + Druid 连接池 |
 | 迁移 | Flyway（数据库版本化）|
+| 接口文档 | springdoc OpenAPI 2.3.0（Swagger UI：`/swagger-ui.html`）|
+| 指标 | Micrometer + Prometheus registry（`/actuator/prometheus`）|
 | 前端 | Vue3 + Element Plus + ECharts（本地化，无需构建）|
 | 测试 | JUnit 5 + Mockito + Awaitility + Testcontainers |
+| CI | GitHub Actions（`mvn verify` + compose 部署冒烟）|
 | 部署 | Dockerfile（多阶段 / 非 root） + docker-compose |
 
 ---
@@ -253,7 +272,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 层级 | 命令 | 覆盖 | 状态 |
 |------|------|------|------|
-| 单元测试 | `.\mvnw.cmd test` | **110 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/**定时任务租约互斥**/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机/可信代理与 XFF 防伪造/**Web 层契约 15 项** | ✅ 实测全绿 |
+| 单元测试 | `.\mvnw.cmd test` | **126 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/定时任务租约互斥/限流（登录+下单）/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机/可信代理与 XFF 防伪造/**失效重试队列 6 项**/**Micrometer 指标 4 项**/Web 层契约 18 项 | ✅ 实测全绿 |
 | Redis 层集成测试 | `.\mvnw.cmd verify` | Testcontainers 真实 `redis:7-alpine` 容器：生产序列化配置往返、空哨兵值、SCAN、ZSet 热度 | ✅ **实测真跑通过**（4/4，无 Docker 时如实 skip） |
 | 数据库层集成测试 | `.\mvnw.cmd verify` | `DbLayerIT`：Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway：迁移版本/原子扣减/条件状态更新/下单取消全链路/**并发双取消只回补一次**/Cache Aside/穿透标记 | ✅ **实测真跑通过**（7/7，无 Docker 时如实 skip） |
 | 持续集成 | push / PR 自动触发 | `.github/workflows/ci.yml`：`mvn verify` + compose 部署冒烟 | ✅ 已接入（见仓库 Actions 徽章） |
@@ -306,7 +325,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 项 | 状态 | 证据 |
 |----|------|------|
-| 33 → 110 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
+| 33 → 126 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
 | fat jar 构建 | ✅ 通过 | 58,453,755 B，`BOOT-INF/lib` 89 项 |
 | 登录 / 权限矩阵 | ✅ 通过 | `admin/admin123` 登录 200；普通用户访问管理接口 403；未登录管理接口 401；无效 token 401 |
 | Cache Aside 命中 | ✅ 通过 | 二次查询走缓存；统计 hit/miss、缓存 4.86ms vs DB 14.03ms |
@@ -334,6 +353,10 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | **数据库层集成测试** | ✅ **通过** | `DbLayerIT`：真实 `mysql:8.0` + `redis:7-alpine` 容器 + 完整 Spring 上下文，**7/7 通过**（含 Flyway 迁移版本、原子扣减、条件状态更新、并发双取消只回补一次） |
 | 镜像构建换源 | ✅ 通过 | `MVNW_REPOURL` + `MAVEN_MIRROR_URL` 指向阿里云后，镜像内 Maven 构建成功 |
 | **CI 首次运行** | ✅ 通过 | GitHub Actions run #1（push 到 main 触发）：`测试` Job 全绿（Testcontainers 在 runner 上**真跑**，不跳过）+ `docker compose 一键部署冒烟` Job 全绿（健康就绪 + 前端 200 + `/cache/summary` 200 + `/cache/stats` 401 + `/actuator/metrics` 404 断言全部通过） |
+| **Swagger UI（v3.4）** | ✅ 通过 | `/swagger-ui.html` 200、`/v3/api-docs` 200，解析出 **28 个路径 / 6 个 Tag**，30 个接口带中文 summary |
+| **Prometheus 指标（v3.4）** | ✅ 通过 | `/actuator/prometheus` 200，含 `cache_access_total`、`cache_path_seconds_count`、`cache_circuit_open`、`cache_delete_failures`、`cache_evict_retry_pending`；`/actuator/metrics` 仍为 404 |
+| **下单限流（v3.4）** | ✅ 通过 | 同一用户连续下单 12 次 → `200 × 10` + `429 × 2`（60 秒 10 单） |
+| 失效重试队列（v3.4） | ✅ 单元测试覆盖（6 项） | 成功出队 / 失败退避 / 熔断期不消耗次数 / 超限放弃 / 同 key 去重 / 队列满丢弃；线上指标 `cache_evict_retry*` 已就位（实测 pending=0）。**端到端触发受限**：Redis 宕机时鉴权 fail-closed，写请求进不来，故现实触发场景是 Redis 抖动（见 §9.2） |
 
 ### 9.2 已知限制（未修，属取舍或待办）
 
@@ -342,18 +365,21 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | 本地 jar 不含前端 | 同源托管只在 Docker 镜像内成立；本地 8083 访问页面 404（已实测对比） | 若要在本地也托管，把 `frontend/*` 复制进 `src/main/resources/static` 后再打包 |
 | Docker 构建依赖网络 | 基础镜像 `mysql:8.0`/`temurin` 在国内可能拉不动（本项目实测用过 `docker.1ms.run` 镜像源拉取后 `docker tag` 回官方名）；Maven 换源见 §四 | 稳定网络或预先拉好镜像 + 配 `registry-mirrors` |
 | X-Forwarded-For 与代理部署 | v3.3 起默认**不信任** XFF（取 socket 地址）；只有在 Nginx/网关后面才需要配置 `APP_TRUSTED_PROXIES` | 部署在反向代理后时把网关地址（支持 CIDR）填进该变量，否则所有请求会被算成同一个 IP |
-| 缓存统计与 Actuator | v3.3 起：`/cache/stats` 仅管理员、`/cache/summary` 公开且只含演示指标；Actuator 只暴露 `health` | 如需更多运维端点，建议接入 Spring Security 后再开放 |
+| 缓存统计与 Actuator | v3.3 起：`/cache/stats` 仅管理员、`/cache/summary` 公开且只含演示指标；Actuator 只暴露 `health` + `prometheus` | 如需更多运维端点，建议接入 Spring Security 后再开放；`/actuator/prometheus` 生产上应只在内网暴露 |
+| Swagger UI 公开 | `/swagger-ui.html` 与 `/v3/api-docs` 未鉴权（拦截器只管 `/api/**`），演示项目方便，生产等于把接口清单公开 | 生产可设 `springdoc.api-docs.enabled=false`，或把它们放到网关鉴权之后 |
 | 下架商品仍可被读路径命中 | 读缓存/回源不校验 `status`，`status=0` 的商品仍能查到并回写缓存（仅启动预热按 `status=1` 过滤） | 若要下架即不可见，需在读路径加 status 判断并同步清理缓存 |
-| 一致性依赖双删 + TTL | 删除失败只计数不重试，无 binlog/MQ 补偿；极端情况下脏数据靠 TTL（1800s）收敛 | 上量后引入 binlog 订阅或消息驱动失效，并给 key 加版本号 |
+| 一致性：已加"失效重试 + 退避"，仍有边界 | v3.4 新增进程内重试队列（最多 6 次、退避到 60s、熔断期不计次）；**剩下**：队列不跨实例/被 kill -9 会丢、无 key 版本号、无 binlog/MQ 补偿，最终仍靠 TTL（1800s）兜底 | 下一步：key 加版本号（写时递增、读到旧版本即失效）→ 再接 binlog 订阅（Canal/Debezium）做跨实例失效广播 |
+| 登录态存在 Redis → 宕机即全站需登录接口不可用 | 鉴权是 fail-closed（安全优先）：Redis 宕机时 `TokenService.verify` 返回 null → 401。实测也印证了这一点，而**读接口仍能降级直查 DB** | 生产建议改无状态 JWT（自校验签名）+ 短 TTL + 刷新令牌；这样 Redis 故障只影响缓存，不影响认证 |
 | 种子弱口令 | `admin/admin123`、`user1|user2/123456` 随仓库发布 | 公开仓库前移除种子账号或强制首登改密 |
 | 依赖版本 | 已升到 Spring Boot **3.2.12**（3.2 线最后一版，含 spring-web/tomcat CVE 修复）；但 3.2.x 整条线已停止 OSS 支持 | 若要继续跟进：3.3/3.4 属于小版本迁移（MyBatis-Starter、Redisson、Flyway 需同步验证）；4.x 是更大的迁移（Spring Framework 7 / 模块化），建议单独开分支做 |
 | Redis 故障期首请求仍有 ~0.5s | 熔断把"每个请求都等超时"变成"只等一次"：首次失败仍要等一次连接/命令超时（已把 Redisson 调成 `timeout/connectTimeout=2s`、`retryAttempts=1`、`retryInterval=500ms`） | 若还要更低：把 `redis.timeout` 调到 500ms 级，或让熔断对"连接被拒"这类错误单独更快触发 |
 | 打包与运行互斥 | 应用从 jar 运行时 `mvnw clean package` 会失败（Windows 文件占用） | 先停应用再打包；或用容器内构建 |
 | 定时任务租约的取舍 | 抢占后持有租约到本轮结束（≈调度间隔 50s/60s）。实例在任务中途崩溃时，**最多会跳过一轮**（下下轮恢复），换来的是"同一轮绝不重复执行" | 需要"绝不漏跑"的任务（如对账）应改成持久化任务表 + 重试，而不是靠租约锁 |
 | 部分列表接口未分页 | `GET /api/product/list`、`GET /api/admin/order/list`、`GET /api/category/list` 仍是全量返回（当前数据量小） | 数据量上来后统一改成与 `/product/page` 一致的分页接口 |
-| 写接口限流只盖了登录 | 下单等写接口没有频率限制 | 按需复用 `RateLimiter` 加维度（用户 + 接口） |
+| 写接口限流只盖了登录与下单 | v3.4 已给下单加用户维度限流；其它写接口（商品增删改、订单审核）暂无 | 按需复用 `RateLimiter`（用户 + 接口维度） |
 
 > **一句话总结**：v3 把 v2 的"架构级缺陷"补成了工程实现，v3.1 把"实现与声明"之间的差距补平了，
-> v3.2 又把"只有文档、没有实测证据"的两条（compose 一键部署、Testcontainers 集成测试）真正跑通了。
-> 当前状态是**可运行、可测试、可一键部署、且每一条声明都能指出证据来源**；
-> 剩下的是真正的深水区：DB 层集成测试、限流/鉴权的边界加固、以及一致性从"双删 + TTL"升级到 binlog/消息驱动。
+> v3.2 把"只有文档、没有实测证据"的两条（compose 一键部署、Testcontainers 集成测试）真正跑通，
+> v3.3 收紧了限流/鉴权边界，v3.4 补上了接口文档、标准指标与失效重试。
+> 当前状态是**可运行、可测试、可一键部署、可观测，且每条声明都能指出证据来源**；
+> 只剩两块真正的深水区：一致性（key 版本号 → binlog 订阅）与无状态认证（JWT 替代 Redis 登录态），路径已写在 §9.2。
