@@ -54,6 +54,16 @@ public class CacheProperties {
     /** 热度榜过期天数 */
     private Integer hotRankTtlDays = 7;
 
+    /**
+     * Redis 本地熔断：连续失败几次后打开熔断（v3.2）
+     * 默认 1 = 第一次失败就熔断：因为降级路径永远是"直查 DB"这个正确结果，
+     * 与其让用户等 2s 超时，不如立刻切到 DB。抖动敏感场景可调大（如 3）。
+     */
+    private Integer breakerFailureThreshold = 1;
+
+    /** Redis 本地熔断：打开后多少毫秒内的 Redis 调用直接走降级（不再发起请求） */
+    private Long breakerOpenMs = 5000L;
+
     @PostConstruct
     public void printConfig() {
         log.info("========================================");
@@ -61,6 +71,7 @@ public class CacheProperties {
         log.info("  Key前缀: {} | TTL: {}s(+随机{}s) | 空值TTL: {}s", prefix, ttl, ttlRandomSeconds, nullTtl);
         log.info("  延迟双删间隔: {}ms | 锁等待: {}ms | 榜单容量: {} / {}天",
                 delayDeleteMs, lockWaitMs, hotRankMaxSize, hotRankTtlDays);
+        log.info("  Redis 熔断: 连续失败 {} 次后打开 {}ms", breakerFailureThreshold, breakerOpenMs);
         log.info("========================================");
     }
 }

@@ -37,33 +37,26 @@ public class OrderAdminController {
 
     @GetMapping("/list")
     public Result<List<Order>> list() {
-        requireAdmin();
+        UserContext.requireAdmin();
         return Result.success(orderService.allOrders());
     }
 
     @PostMapping("/{id}/refund/approve")
     public Result<Order> approveRefund(@PathVariable Long id) {
-        requireAdmin();
+        UserContext.requireAdmin();
         return Result.success("退款已通过，库存已回补", orderService.approveRefund(id));
     }
 
     @PostMapping("/{id}/return/approve")
     public Result<Order> approveReturn(@PathVariable Long id) {
-        requireAdmin();
+        UserContext.requireAdmin();
         return Result.success("退货已通过，库存已回补", orderService.approveReturn(id));
     }
 
     @PostMapping("/{id}/reject")
     public Result<Order> reject(@PathVariable Long id, @RequestBody(required = false) RejectReq req) {
-        requireAdmin();
+        UserContext.requireAdmin();
         String reason = req == null ? "不符合条件" : req.getReason();
         return Result.success("已拒绝", orderService.rejectAudit(id, reason));
-    }
-
-    private void requireAdmin() {
-        UserContext.LoginUser user = UserContext.getUser();
-        if (user == null || !user.isAdmin()) {
-            throw new BusinessException(403, "需要管理员权限");
-        }
     }
 }

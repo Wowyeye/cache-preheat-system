@@ -46,7 +46,9 @@ spring:
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       database: ${REDIS_DATABASE:1}
-      timeout: 5000ms
+      # 命令超时：原来 5s，Redis 故障期单请求要串行撞多次超时（实测 28.8s 才降级返回）；
+      # 降到 2s 并配合本地熔断（见 cache.breaker-*），故障期首请求 ~2s、后续请求毫秒级
+      timeout: ${REDIS_TIMEOUT_MS:2000}ms
 
 # ========== MyBatis ==========
 mybatis:
@@ -67,6 +69,9 @@ cache:
   hot-rank-max-size: 200
   hot-rank-ttl-days: 7
   auto-preheat-interval-ms: 60000
+  # Redis 本地熔断：连续失败 N 次后，接下来 open-ms 内的 Redis 调用直接走降级（不发起请求）
+  breaker-failure-threshold: ${CACHE_BREAKER_THRESHOLD:1}
+  breaker-open-ms: ${CACHE_BREAKER_OPEN_MS:5000}
 
 # ========== 应用级配置 ==========
 app:

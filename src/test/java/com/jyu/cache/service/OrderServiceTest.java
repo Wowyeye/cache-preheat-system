@@ -12,6 +12,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -20,18 +22,23 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * OrderService 单元测试：订单状态机 + 原子扣减防超卖 + 超时取消
+ * OrderService 单元测试：订单状态机 + 原子扣减防超卖 + 逐单事务的超时取消
+ *
+ * v3.1 重点：所有状态流转都走条件 UPDATE（updateStatusIf），
+ * 拿不到流转权（影响 0 行）必须抛 409 且**不回补库存**——这是双回补/库存虚增的回归测试。
  */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("订单状态机与超卖防护单元测试")
@@ -40,6 +47,8 @@ class OrderServiceTest {
     @Mock private OrderMapper orderMapper;
     @Mock private ProductMapper productMapper;
     @Mock private ProductService productService;
+    @Mock private PlatformTransactionManager transactionManager;
+    @Mock private TransactionStatus transactionStatus;
 
     private OrderService orderService;
 
@@ -48,7 +57,9 @@ class OrderServiceTest {
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderService(orderMapper, productMapper, productService);
+        // 超时取消用 TransactionTemplate（每单一个独立事务）；测试里用事务管理器桩代跑
+        lenient().when(transactionManager.getTransaction(any())).thenReturn(transactionStatus);
+        orderService = new OrderService(orderMapper, productMapper, productService, transactionManager);
 
         pendingOrder = new Order();
         pendingOrder.setId(100L);
@@ -65,6 +76,13 @@ class OrderServiceTest {
         stockProduct.setStatus(1);
     }
 
+    private OrderItem item(long productId, int quantity) {
+        OrderItem item = new OrderItem();
+        item.setProductId(productId);
+        item.setQuantity(quantity);
+        return item;
+    }
+
     // ==================== 状态机：非法流转拒绝 ====================
 
     @Test
@@ -79,6 +97,7 @@ class OrderServiceTest {
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> orderService.pay(2L, 101L));
         assertEquals(409, ex.getCode());
+        verify(orderMapper, never()).updateStatusIf(anyLong(), anyString(), any(), anyString(), any(), any());
     }
 
     @Test
@@ -101,6 +120,30 @@ class OrderServiceTest {
         assertEquals(403, ex.getCode());
     }
 
+    @Test
+    @DisplayName("状态机：支付走条件更新并写入 pay_time")
+    void pay_usesConditionalUpdateWithPayTime() {
+        when(orderMapper.selectById(100L)).thenReturn(pendingOrder);
+        when(orderMapper.updateStatusIf(eq(100L), eq(Order.STATUS_PAID), any(), eq(Order.STATUS_PENDING_PAYMENT),
+                any(LocalDateTime.class), isNull())).thenReturn(1);
+
+        orderService.pay(2L, 100L);
+
+        verify(orderMapper).updateStatusIf(eq(100L), eq(Order.STATUS_PAID), any(), eq(Order.STATUS_PENDING_PAYMENT),
+                any(LocalDateTime.class), isNull());
+    }
+
+    @Test
+    @DisplayName("并发安全：支付时若已被超时取消（条件更新 0 行）-> 409，不静默成功")
+    void pay_conflictsWhenTransitionLost() {
+        when(orderMapper.selectById(100L)).thenReturn(pendingOrder);
+        when(orderMapper.updateStatusIf(anyLong(), anyString(), any(), anyString(), any(), any())).thenReturn(0);
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> orderService.pay(2L, 100L));
+
+        assertEquals(409, ex.getCode());
+    }
+
     // ==================== 防超卖：原子扣减 ====================
 
     @Test
@@ -119,9 +162,9 @@ class OrderServiceTest {
         Order order = orderService.createOrder(2L,
                 List.of(Map.of("productId", 1, "quantity", 2)), "");
 
-        assertEquals(Order.STATUS_PENDING_PAYMENT, order.getStatus());
         verify(productMapper).decreaseStock(1L, 2);       // 原子扣减被调用
         verify(productService).evictCache(1L);            // 库存变更触发延迟双删
+        assertEquals(100L, order.getId());
     }
 
     @Test
@@ -138,16 +181,33 @@ class OrderServiceTest {
         verify(orderMapper, never()).insert(any(Order.class));
     }
 
-    // ==================== 取消订单：回补库存 ====================
+    @Test
+    @DisplayName("入参校验：数量为 0 -> 400（而不是掉进 500）")
+    void createOrder_rejectsNonPositiveQuantity() {
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> orderService.createOrder(2L, List.of(Map.of("productId", 1, "quantity", 0)), ""));
+
+        assertEquals(400, ex.getCode());
+    }
 
     @Test
-    @DisplayName("取消订单：状态置为已取消并回补库存")
+    @DisplayName("入参校验：空清单 -> 400")
+    void createOrder_rejectsEmptyItems() {
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> orderService.createOrder(2L, List.of(), ""));
+
+        assertEquals(400, ex.getCode());
+    }
+
+    // ==================== 取消订单：条件更新才回补库存 ====================
+
+    @Test
+    @DisplayName("取消订单：抢到流转权 -> 状态置为已取消并回补库存")
     void cancel_restoresStock() {
         when(orderMapper.selectById(100L)).thenReturn(pendingOrder);
-        OrderItem item = new OrderItem();
-        item.setProductId(1L);
-        item.setQuantity(2);
-        when(orderMapper.selectItemsByOrderId(100L)).thenReturn(List.of(item));
+        when(orderMapper.updateStatusIf(eq(100L), eq(Order.STATUS_CANCELLED), anyString(),
+                eq(Order.STATUS_PENDING_PAYMENT), isNull(), any(LocalDateTime.class))).thenReturn(1);
+        when(orderMapper.selectItemsByOrderId(100L)).thenReturn(List.of(item(1L, 2)));
 
         orderService.cancel(2L, 100L);
 
@@ -155,25 +215,52 @@ class OrderServiceTest {
         verify(productService).evictCache(1L);        // 回补后缓存失效
     }
 
-    // ==================== 超时取消（v3 新增） ====================
+    @Test
+    @DisplayName("并发安全（v3.1 修复）：重复取消 / 与超时调度撞车 -> 409 且不双回补库存")
+    void cancel_conflictsWhenTransitionLost_doesNotRestoreStockTwice() {
+        when(orderMapper.selectById(100L)).thenReturn(pendingOrder);
+        when(orderMapper.updateStatusIf(anyLong(), anyString(), anyString(), anyString(), any(), any()))
+                .thenReturn(0);   // 另一方已抢先改成 CANCELLED
+
+        BusinessException ex = assertThrows(BusinessException.class, () -> orderService.cancel(2L, 100L));
+
+        assertEquals(409, ex.getCode());
+        verify(productMapper, never()).increaseStock(anyLong(), anyInt());
+    }
+
+    @Test
+    @DisplayName("审核退款：并发下拿不到流转权 -> 409 且不回补库存")
+    void approveRefund_conflictsWhenTransitionLost() {
+        Order refunding = new Order();
+        refunding.setId(102L);
+        refunding.setUserId(2L);
+        refunding.setStatus(Order.STATUS_REFUNDING);
+        when(orderMapper.selectById(102L)).thenReturn(refunding);
+        when(orderMapper.updateStatusIf(anyLong(), anyString(), any(), anyString(), any(), any())).thenReturn(0);
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> orderService.approveRefund(102L));
+
+        assertEquals(409, ex.getCode());
+        verify(productMapper, never()).increaseStock(anyLong(), anyInt());
+    }
+
+    // ==================== 超时取消：每单独立事务 ====================
 
     @Test
     @DisplayName("超时取消：状态机式更新成功（返回 1）-> 回补库存")
     void cancelTimeout_cancelsAndRestores() {
-        OrderItem item = new OrderItem();
-        item.setProductId(1L);
-        item.setQuantity(2);
-        pendingOrder.setItems(List.of(item));
+        pendingOrder.setItems(List.of(item(1L, 2)));
         when(orderMapper.selectTimeoutPending(any(LocalDateTime.class), anyInt()))
                 .thenReturn(List.of(pendingOrder));
-        when(orderMapper.updateStatusIf(eq(100L), eq(Order.STATUS_CANCELLED),
-                anyString(), eq(Order.STATUS_PENDING_PAYMENT), any(LocalDateTime.class)))
-                .thenReturn(1);   // 抢到取消权
+        when(orderMapper.updateStatusIf(eq(100L), eq(Order.STATUS_CANCELLED), anyString(),
+                eq(Order.STATUS_PENDING_PAYMENT), isNull(), any(LocalDateTime.class))).thenReturn(1);
 
         int cancelled = orderService.cancelTimeoutOrders(30);
 
         assertEquals(1, cancelled);
         verify(productMapper).increaseStock(1L, 2);
+        verify(transactionManager).commit(transactionStatus);
     }
 
     @Test
@@ -181,8 +268,7 @@ class OrderServiceTest {
     void cancelTimeout_skipsWhenUpdateAffectsZeroRows() {
         when(orderMapper.selectTimeoutPending(any(LocalDateTime.class), anyInt()))
                 .thenReturn(List.of(pendingOrder));
-        when(orderMapper.updateStatusIf(anyLong(), anyString(), anyString(), anyString(),
-                any(LocalDateTime.class)))
+        when(orderMapper.updateStatusIf(anyLong(), anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(0);   // 用户手动取消已抢先（状态已不是 PENDING_PAYMENT）
 
         int cancelled = orderService.cancelTimeoutOrders(30);
@@ -192,8 +278,8 @@ class OrderServiceTest {
     }
 
     @Test
-    @DisplayName("超时取消：单个订单异常不阻断整批")
-    void cancelTimeout_continuesOnSingleFailure() {
+    @DisplayName("超时取消：单笔异常只回滚该笔并继续处理下一笔（逐单事务）")
+    void cancelTimeout_continuesOnSingleFailure_withPerOrderRollback() {
         Order bad = new Order();
         bad.setId(200L);
         bad.setOrderNo("260911000002");
@@ -204,15 +290,14 @@ class OrderServiceTest {
                 .thenReturn(List.of(bad, pendingOrder));
         // 第一笔：回补库存时数据库异常
         when(orderMapper.selectItemsByOrderId(200L)).thenThrow(new RuntimeException("db error"));
-        when(orderMapper.updateStatusIf(anyLong(), anyString(), anyString(), anyString(),
-                any(LocalDateTime.class))).thenReturn(1);
-        OrderItem item = new OrderItem();
-        item.setProductId(1L);
-        item.setQuantity(2);
-        when(orderMapper.selectItemsByOrderId(100L)).thenReturn(List.of(item));
+        when(orderMapper.updateStatusIf(anyLong(), anyString(), anyString(), anyString(), any(), any()))
+                .thenReturn(1);
+        when(orderMapper.selectItemsByOrderId(100L)).thenReturn(List.of(item(1L, 2)));
 
         int cancelled = orderService.cancelTimeoutOrders(30);
 
-        assertTrue(cancelled >= 1, "第二笔应正常取消");
+        assertEquals(1, cancelled, "第二笔应正常取消，第一笔被单独回滚");
+        verify(transactionManager, times(1)).rollback(any());   // 只有失败的那笔回滚
+        verify(productMapper).increaseStock(1L, 2);
     }
 }

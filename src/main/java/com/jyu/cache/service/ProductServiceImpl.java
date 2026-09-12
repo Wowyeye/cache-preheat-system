@@ -30,9 +30,10 @@ import java.util.concurrent.TimeUnit;
  *
  * 四、KEYS -> SCAN：统计与清缓存不再阻塞 Redis。
  *
- * 五、延迟双删：new Thread() -> 专用线程池（见 DelayDeleteService）。
+ * 五、延迟双删：new Thread() -> 专用延迟调度线程池，且失效动作后置到事务提交后（见 DelayDeleteService）。
  *
- * 六、热度榜单：防污染 + 容量上限（不存在 ID 不进榜，见 HotSpotService）。
+ * 六、热度榜单：防污染 + 容量上限
+ *   热度只在"确认商品存在"后累加（缓存命中或回源命中），不存在的 ID 从源头进不了榜（见 HotSpotService）。
  *
  * Cache Aside 六大策略本身（预热/旁路读/双删/穿透/击穿/雪崩）与 v2 完全一致。
  */
@@ -114,9 +115,6 @@ public class ProductServiceImpl implements ProductService {
         long startNanos = System.nanoTime();
         String key = buildKey(id);
 
-        // 记录实时热度（Redis 故障只记 warn，不影响主流程；不存在的 ID 不进榜）
-        hotSpotService.recordAccess(id);
-
         // --- 第一步：查缓存（Redis 故障自动降级直查 DB） ---
         Object cached = safeRedis.degrade(
                 () -> redisTemplate.opsForValue().get(key),
@@ -125,18 +123,25 @@ public class ProductServiceImpl implements ProductService {
                     return null;
                 });
 
-        // 命中空值标记 -> 防穿透，直接返回 null
+        // 命中空值标记 -> 防穿透，直接返回 null（不记热度：这个 ID 根本不存在）
         if (NULL_VALUE.equals(cached)) {
             statsService.recordNullHit(System.nanoTime() - startNanos);
             log.debug("[查询] 商品 {} 命中空值标记（穿透防护）", id);
             return null;
         }
 
-        // 命中真实数据 -> 直接返回
-        if (cached != null) {
+        // 命中真实数据 -> 记热度（只有存在的商品才进榜）并直接返回
+        if (cached instanceof Product cachedProduct) {
+            hotSpotService.recordAccess(id);
             statsService.recordHit(System.nanoTime() - startNanos);
             log.debug("[查询] 商品 {} 缓存命中", id);
-            return (Product) cached;
+            return cachedProduct;
+        }
+
+        // 缓存里是脏值（旧格式/被外部写入）：删掉当未命中处理，不让强转异常变成 500
+        if (cached != null) {
+            log.warn("[查询] 商品 {} 缓存值类型异常（{}），清除后回源", id, cached.getClass().getName());
+            safeRedis.tryRun(() -> redisTemplate.delete(key));
         }
 
         // --- 第二步：未命中 -> 分布式锁内回源（防击穿；锁不可用则降级直查） ---
@@ -151,6 +156,9 @@ public class ProductServiceImpl implements ProductService {
                     log.warn("[查询] 商品 {} 未拿到锁，降级直查数据库", id);
                     Product p = productMapper.selectById(id);
                     statsService.recordMiss(System.nanoTime() - startNanos);
+                    if (p != null) {
+                        recordRealAccess(id);
+                    }
                     return p;
                 });
     }
@@ -163,9 +171,10 @@ public class ProductServiceImpl implements ProductService {
             statsService.recordNullHit(System.nanoTime() - startNanos);
             return null;
         }
-        if (cached != null) {
+        if (cached instanceof Product cachedProduct) {
+            hotSpotService.recordAccess(id);
             statsService.recordHit(System.nanoTime() - startNanos);
-            return (Product) cached;
+            return cachedProduct;
         }
 
         Product product = productMapper.selectById(id);
@@ -175,6 +184,7 @@ public class ProductServiceImpl implements ProductService {
             // 数据库有 -> 写入缓存 -> 返回
             safeRedis.tryRun(() -> redisTemplate.opsForValue()
                     .set(key, product, randomTtl(), TimeUnit.SECONDS));
+            recordRealAccess(id);
             log.info("[查询] 商品 {} 数据库查到，已写入缓存", id);
             return product;
         }
@@ -184,6 +194,17 @@ public class ProductServiceImpl implements ProductService {
                 .set(key, NULL_VALUE, cacheProperties.getNullTtl(), TimeUnit.SECONDS));
         log.info("[查询] 商品 {} 数据库不存在，已缓存空值标记（穿透防护）", id);
         return null;
+    }
+
+    /**
+     * 记录一次"真实存在的商品访问"：热度 +1，并把浏览量落库。
+     *
+     * 只有回源（真的读到 DB）才累加 view_count——缓存命中不写库，避免每次读都产生一次 DB 写。
+     * 这也让启动预热用的 view_count 排序随时间真实变化，而不是永远停在种子数据上。
+     */
+    private void recordRealAccess(Long id) {
+        hotSpotService.recordAccess(id);
+        safeRedis.tryRun(() -> productMapper.incrementViewCount(id));
     }
 
     // ================================================================
@@ -229,18 +250,26 @@ public class ProductServiceImpl implements ProductService {
     }
 
     @Override
-    public void update(Product product) {
-        productMapper.updateById(product);
+    public boolean update(Product product) {
+        if (productMapper.updateById(product) == 0) {
+            log.warn("[更新] 商品 {} 不存在，未更新任何行", product.getId());
+            return false;
+        }
         delayDeleteService.evictWithDelay(buildKey(product.getId()));
         log.info("[更新] 商品 {} 已更新并触发延迟双删", product.getId());
+        return true;
     }
 
     @Override
-    public void delete(Long id) {
-        productMapper.deleteById(id);
+    public boolean delete(Long id) {
+        if (productMapper.deleteById(id) == 0) {
+            log.warn("[删除] 商品 {} 不存在，未删除任何行", id);
+            return false;
+        }
         delayDeleteService.evictWithDelay(buildKey(id));
         hotSpotService.removeHot(id);   // 商品删了，热度榜同步清掉，防止定时预热查空数据
         log.info("[删除] 商品 {} 已删除并触发延迟双删 + 榜单清理", id);
+        return true;
     }
 
     // ================================================================
@@ -252,6 +281,7 @@ public class ProductServiceImpl implements ProductService {
         // Redis 中缓存 key 数量（SCAN 替代 KEYS）
         stats.put("cacheKeyCount", safeRedis.scanKeys(cacheProperties.getPrefix() + ":*").size());
         stats.put("productTotal", productMapper.countAll());
+        stats.put("firstDeleteFailures", delayDeleteService.getFirstDeleteFailures());
         stats.put("secondDeleteFailures", delayDeleteService.getSecondDeleteFailures());
         return stats;
     }

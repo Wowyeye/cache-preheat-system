@@ -30,10 +30,12 @@ import java.util.concurrent.TimeUnit;
  *   3. member 被 JSON 序列化成带引号的 "999"，运维工具直读坑。
  *
  * v3 修复：
- *   1. recordAccess 先查空值标记：穿透防护已标记为不存在的 ID 直接不进榜；
+ *   1. 【防污染的正确做法】recordAccess 只由"已确认商品存在"的调用方触发
+ *      （读缓存命中 / 回源查到），不存在的 ID 从源头就不进榜，不再依赖事后查空值标记；
  *   2. 每轮预热后裁剪榜单到 hotRankMaxSize（ZREMRANGEBYRANK 保头部）；
  *   3. 榜单 key 设置 hotRankTtlDays 天整体过期兜底；
- *   4. 删除商品时同步 ZREM 榜单成员。
+ *   4. 删除商品时同步 ZREM 榜单成员；
+ *   5. 榜单出现非数字脏成员时跳过并移除，不再让整轮预热/整个接口 500。
  */
 @Slf4j
 @Service
@@ -63,18 +65,14 @@ public class HotSpotService {
 
     /**
      * 记录一次商品访问（热度 +1）。
-     * 防污染逻辑：若该商品已命中"空值标记"（数据库确认为不存在），直接跳过——
-     * 恶意扫描不存在的 ID 无法再把垃圾 ID 顶进排行榜。
+     *
+     * 【防污染约定】调用方必须已确认该商品真实存在（缓存命中，或回源查到非 null）。
+     * 这样"扫描不存在 ID"的流量根本不会写进榜单，比"事后查空值标记再回滚"更彻底：
+     * 空值标记有 60s TTL，攻击者只要每 60s 换一批新 ID 就能绕过旧方案灌榜。
      */
     public void recordAccess(Long productId) {
-        safeRedis.tryRun(() -> {
-            // 空值标记存在 = 数据库确认无此商品，不进榜
-            Object nullMark = redisTemplate.opsForValue().get(cacheProperties.getPrefix() + ":" + productId);
-            if (nullMark != null && "NULL_VALUE_MARKER".equals(nullMark)) {
-                return;
-            }
-            redisTemplate.opsForZSet().incrementScore(HOT_RANK_KEY, String.valueOf(productId), 1);
-        });
+        safeRedis.tryRun(() ->
+                redisTemplate.opsForZSet().incrementScore(HOT_RANK_KEY, String.valueOf(productId), 1));
     }
 
     /** 商品被删除时同步移除榜单成员 */
@@ -90,6 +88,8 @@ public class HotSpotService {
     public void autoPreheat() {
         try {
             int count = hotSpotPreheat();
+            // 【v3 修正】自动预热同样要记账，否则监控页的"自动预热轮次/最近一轮"永远是 0/未执行
+            recordStats(count);
             if (count > 0) {
                 log.info("[热点识别] 自动预热完成，本轮加载 {} 条热点商品到缓存", count);
             }
@@ -110,7 +110,10 @@ public class HotSpotService {
 
         int count = 0;
         for (String idStr : hotIds) {
-            long id = Long.parseLong(idStr);
+            Long id = parseMemberId(idStr);
+            if (id == null) {
+                continue;   // 脏成员已在 parseMemberId 内移除，本轮跳过而不是让整轮预热崩掉
+            }
             Product product = productMapper.selectById(id);
             if (product != null) {
                 long ttl = cacheProperties.getTtl()
@@ -155,13 +158,31 @@ public class HotSpotService {
             if (tuples != null) {
                 for (ZSetOperations.TypedTuple<Object> tuple : tuples) {
                     if (tuple.getValue() != null) {
-                        // member 统一按去掉引号的纯数字字符串处理（修复 v2 序列化带引号坑）
+                        // member 统一按去掉引号的纯数字字符串处理（兼容 v2 遗留的带引号格式）
                         ids.add(String.valueOf(tuple.getValue()).replace("\"", ""));
                     }
                 }
             }
         });
         return ids;
+    }
+
+    /**
+     * 解析榜单成员。兼容 v2 遗留的带引号格式与运维手工写入的脏数据：
+     * 非法成员记 warn 并从榜单移除（自愈），返回 null 让调用方跳过。
+     */
+    private Long parseMemberId(String member) {
+        if (member == null) {
+            return null;
+        }
+        String cleaned = member.replace("\"", "").trim();
+        try {
+            return Long.parseLong(cleaned);
+        } catch (NumberFormatException e) {
+            log.warn("[热点识别] 榜单存在非数字成员（{}），已从榜单移除", member);
+            safeRedis.tryRun(() -> redisTemplate.opsForZSet().remove(HOT_RANK_KEY, member));
+            return null;
+        }
     }
 
     // ================================================================
@@ -172,12 +193,15 @@ public class HotSpotService {
         List<Map<String, Object>> result = new ArrayList<>();
         List<String> ids = topHotIds(topN);
         for (String idStr : ids) {
-            long id = Long.parseLong(idStr);
+            Long id = parseMemberId(idStr);
+            if (id == null) {
+                continue;
+            }
             Double score = safeRedis.degrade(
                     () -> redisTemplate.opsForZSet().score(HOT_RANK_KEY, String.valueOf(id)),
                     () -> null);
             Map<String, Object> item = new HashMap<>(5);
-            item.put("productId", idStr);
+            item.put("productId", String.valueOf(id));
             item.put("hotScore", score == null ? 0 : score);
             Product product = productMapper.selectById(id);
             if (product != null) {

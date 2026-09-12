@@ -57,25 +57,29 @@ public class ProductController {
 
     @PostMapping
     public Result<Void> add(@RequestBody Product product) {
-        requireAdmin();
+        UserContext.requireAdmin();
         productService.add(product);
         return Result.success("新增成功", null);
     }
 
     @PutMapping
     public Result<Void> update(@RequestBody Product product) {
-        requireAdmin();
+        UserContext.requireAdmin();
         if (product.getId() == null) {
             return Result.fail("商品ID不能为空");
         }
-        productService.update(product);
+        if (!productService.update(product)) {
+            throw new BusinessException(404, "商品不存在，更新失败");
+        }
         return Result.success("更新成功，已触发延迟双删策略", null);
     }
 
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable Long id) {
-        requireAdmin();
-        productService.delete(id);
+        UserContext.requireAdmin();
+        if (!productService.delete(id)) {
+            throw new BusinessException(404, "商品不存在，删除失败");
+        }
         return Result.success("删除成功，已触发延迟双删策略", null);
     }
 
@@ -86,29 +90,22 @@ public class ProductController {
 
     @DeleteMapping("/cache/all")
     public Result<Void> clearAllCache() {
-        requireAdmin();
+        UserContext.requireAdmin();
         int count = productService.clearAllCache();
         return Result.success("已清除 " + count + " 条缓存", null);
     }
 
     @DeleteMapping("/cache/{id}")
     public Result<Void> clearCache(@PathVariable Long id) {
-        requireAdmin();
+        UserContext.requireAdmin();
         productService.clearCache(id);
         return Result.success("已清除该商品缓存", null);
     }
 
     @PostMapping("/preheat")
     public Result<Void> preheat() {
-        requireAdmin();
+        UserContext.requireAdmin();
         int count = productService.preheatCache();
         return Result.success("缓存预热完成，共加载 " + count + " 条热点商品", null);
-    }
-
-    private void requireAdmin() {
-        UserContext.LoginUser user = UserContext.getUser();
-        if (user == null || !user.isAdmin()) {
-            throw new BusinessException(403, "需要管理员权限");
-        }
     }
 }

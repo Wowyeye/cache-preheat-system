@@ -77,22 +77,15 @@
         ORDER BY o.create_time DESC
     </select>
 
-    <update id="updateStatus">
-        UPDATE orders
-        <set>
-            <if test="status != null">status = #{status},</if>
-            <if test="remark != null">remark = #{remark},</if>
-            <if test="payTime != null">pay_time = #{payTime},</if>
-            <if test="finishTime != null">finish_time = #{finishTime},</if>
-        </set>
-        WHERE id = #{id}
-    </update>
+    <!-- 无条件状态更新已移除：所有流转都必须带 WHERE status = 期望状态，见 updateStatusIf -->
 
-    <!-- 【v3】状态机式更新：仅当当前状态 = expectedStatus 才更新（并发安全，超时取消与手动取消竞争时只有一个赢） -->
+    <!-- 【v3】状态机式更新：仅当当前状态 = expectedStatus 才更新（并发安全，超时取消与手动取消竞争时只有一个赢）
+         pay_time 仅在需要时（支付）写入，其余流转保持原值不动 -->
     <update id="updateStatusIf">
         UPDATE orders
         SET status      = #{newStatus},
             remark      = #{remark},
+            <if test="payTime != null">pay_time = #{payTime},</if>
             finish_time = #{finishTime}
         WHERE id = #{id}
           AND status = #{expectedStatus}

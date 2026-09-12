@@ -25,7 +25,9 @@ class DistributedLockTest {
 
     private final RedissonClient redisson = mock(RedissonClient.class);
     private final RLock lock = mock(RLock.class);
-    private final DistributedLock distributedLock = new DistributedLock(redisson);
+    /** 阈值 1 + 极短冷却，便于在单测里验证"失败即熔断"与冷却后恢复 */
+    private final RedisCircuitBreaker breaker = new RedisCircuitBreaker(1, 50L, System::currentTimeMillis);
+    private final DistributedLock distributedLock = new DistributedLock(redisson, breaker);
 
     @Test
     @DisplayName("拿到锁：执行 action 并正确释放")

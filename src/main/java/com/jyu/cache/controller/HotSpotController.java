@@ -37,15 +37,8 @@ public class HotSpotController {
 
     @PostMapping("/preheat")
     public Result<Void> manualPreheat() {
-        requireAdmin();
+        UserContext.requireAdmin();
         int count = hotSpotService.manualPreheat();
         return Result.success("热点预热完成，本轮加载 " + count + " 条商品", null);
-    }
-
-    private void requireAdmin() {
-        UserContext.LoginUser user = UserContext.getUser();
-        if (user == null || !user.isAdmin()) {
-            throw new BusinessException(403, "需要管理员权限");
-        }
     }
 }

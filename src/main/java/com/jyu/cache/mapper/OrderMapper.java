@@ -26,17 +26,18 @@ public interface OrderMapper {
 
     List<Order> selectAll();
 
-    int updateStatus(@Param("id") Long id,
-                     @Param("status") String status,
-                     @Param("remark") String remark,
-                     @Param("payTime") LocalDateTime payTime,
-                     @Param("finishTime") LocalDateTime finishTime);
-
-    /** 【v3】状态机式更新：仅当当前状态等于 expectedStatus 时才更新为新状态（并发安全） */
+    /**
+     * 【v3】状态机式更新：仅当当前状态等于 expectedStatus 时才更新为新状态（并发安全）
+     *
+     * 已删除无条件版本 updateStatus(id, status, ...)：先查后无条件改是 TOCTOU 双回补的根因，
+     * 保留它迟早会被重新用上，所以直接从接口和 XML 里移除。
+     * pay_time 仅在支付流转时传入（其余为 null，保持原值不动）。
+     */
     int updateStatusIf(@Param("id") Long id,
                        @Param("newStatus") String newStatus,
                        @Param("remark") String remark,
                        @Param("expectedStatus") String expectedStatus,
+                       @Param("payTime") LocalDateTime payTime,
                        @Param("finishTime") LocalDateTime finishTime);
 
     /** 【v3】查询超时未支付订单：状态为待支付且创建时间早于 deadline */

@@ -44,13 +44,15 @@ public interface ProductService {
 
     /**
      * 【Cache Aside 写 + 延迟双删】更新商品
+     * @return 是否命中并更新了记录（false = 商品不存在，Controller 据此返回 404）
      */
-    void update(Product product);
+    boolean update(Product product);
 
     /**
      * 【Cache Aside 写 + 延迟双删】删除商品（同步清理热度榜）
+     * @return 是否真的删除了记录（false = 商品不存在，Controller 据此返回 404）
      */
-    void delete(Long id);
+    boolean delete(Long id);
 
     /**
      * 【缓存监控】获取缓存统计信息（指标存 Redis，多实例聚合）
