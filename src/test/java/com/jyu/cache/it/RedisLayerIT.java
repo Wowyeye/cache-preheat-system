@@ -152,7 +152,8 @@ class RedisLayerIT {
     void hotspotZSet_accumulatesAndRemoves() {
         HotSpotService hotSpotService = new HotSpotService(
                 Mockito.mock(ProductMapper.class),   // recordAccess/removeHot 不查库，仅避免 null
-                redisTemplate, safeRedis, cacheProperties);
+                redisTemplate, safeRedis, cacheProperties,
+                Mockito.mock(com.jyu.cache.common.DistributedLock.class));   // 只测 recordAccess/removeHot，不涉及定时任务
 
         hotSpotService.recordAccess(1L);
         hotSpotService.recordAccess(1L);

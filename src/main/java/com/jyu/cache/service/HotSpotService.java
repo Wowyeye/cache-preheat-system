@@ -1,5 +1,6 @@
 package com.jyu.cache.service;
 
+import com.jyu.cache.common.DistributedLock;
 import com.jyu.cache.common.SafeRedisTemplate;
 import com.jyu.cache.config.CacheProperties;
 import com.jyu.cache.entity.Product;
@@ -48,15 +49,18 @@ public class HotSpotService {
     private final RedisTemplate<String, Object> redisTemplate;
     private final SafeRedisTemplate safeRedis;
     private final CacheProperties cacheProperties;
+    private final DistributedLock distributedLock;
 
     public HotSpotService(ProductMapper productMapper,
                           RedisTemplate<String, Object> redisTemplate,
                           SafeRedisTemplate safeRedis,
-                          CacheProperties cacheProperties) {
+                          CacheProperties cacheProperties,
+                          DistributedLock distributedLock) {
         this.productMapper = productMapper;
         this.redisTemplate = redisTemplate;
         this.safeRedis = safeRedis;
         this.cacheProperties = cacheProperties;
+        this.distributedLock = distributedLock;
     }
 
     // ================================================================
@@ -86,6 +90,13 @@ public class HotSpotService {
 
     @Scheduled(fixedDelayString = "${cache.auto-preheat-interval-ms:60000}", initialDelay = 15000)
     public void autoPreheat() {
+        // 多实例互斥：同一轮只让一个实例预热（抢不到就跳过本轮，下轮再抢）。
+        // fail-closed：预热是"锦上添花"，Redis 不可用时没必要每个实例都去重复查库。
+        distributedLock.tryExecuteOnce("auto-preheat", 50_000L, false, this::autoPreheatOnce);
+    }
+
+    /** 单实例内的预热逻辑（由 autoPreheat 抢到锁后调用） */
+    private void autoPreheatOnce() {
         try {
             int count = hotSpotPreheat();
             // 【v3 修正】自动预热同样要记账，否则监控页的"自动预热轮次/最近一轮"永远是 0/未执行

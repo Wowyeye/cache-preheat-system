@@ -1,6 +1,5 @@
 package com.jyu.cache;
 
-import org.mybatis.spring.annotation.MapperScan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -25,9 +24,11 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * 12. 登录限流 + 待支付订单超时自动取消
  * 13. Actuator 健康检查 + 日志文件切割
  * 14. Docker/compose 一键部署
+ *
+ * 注意：`@MapperScan` 已挪到 config/MyBatisConfig（v3.3）——挂在启动类上会让
+ * @WebMvcTest 切片测试也去创建 MyBatis Mapper 而缺少 SqlSessionFactory。
  */
 @SpringBootApplication
-@MapperScan("com.jyu.cache.mapper")
 @EnableScheduling
 public class CacheApplication {
 

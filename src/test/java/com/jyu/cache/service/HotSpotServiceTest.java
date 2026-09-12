@@ -20,6 +20,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -46,6 +47,7 @@ class HotSpotServiceTest {
     @Mock private ZSetOperations<String, Object> zSetOps;
     @Mock private ValueOperations<String, Object> valueOps;
     @Mock private HashOperations<String, Object, Object> hashOps;
+    @Mock private com.jyu.cache.common.DistributedLock distributedLock;
 
     private CacheProperties cacheProperties;
     private HotSpotService hotSpotService;
@@ -60,7 +62,14 @@ class HotSpotServiceTest {
         cacheProperties.setHotRankMaxSize(200);
         cacheProperties.setHotRankTtlDays(7);
 
-        hotSpotService = new HotSpotService(productMapper, redisTemplate, safeRedis, cacheProperties);
+        hotSpotService = new HotSpotService(productMapper, redisTemplate, safeRedis, cacheProperties, distributedLock);
+
+        // 定时任务的多实例抢占：单测里视作"本实例抢到了"，直接执行任务体
+        lenient().when(distributedLock.tryExecuteOnce(anyString(), anyLong(), anyBoolean(), any()))
+                .thenAnswer(inv -> {
+                    ((Runnable) inv.getArgument(3)).run();
+                    return true;
+                });
 
         // tryRun / degrade 直通执行（异常按真实语义处理）
         lenient().doAnswer(inv -> {

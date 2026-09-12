@@ -1,5 +1,6 @@
 package com.jyu.cache.scheduler;
 
+import com.jyu.cache.common.DistributedLock;
 import com.jyu.cache.service.OrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,21 +20,30 @@ import org.springframework.stereotype.Component;
 public class OrderTimeoutScheduler {
 
     private final OrderService orderService;
+    private final DistributedLock distributedLock;
 
     /** 订单超时时间（分钟），可通过 ORDER_TIMEOUT_MINUTES 环境变量调整 */
     @Value("${app.order.timeout-minutes:30}")
     private int timeoutMinutes;
 
-    public OrderTimeoutScheduler(OrderService orderService) {
+    public OrderTimeoutScheduler(OrderService orderService, DistributedLock distributedLock) {
         this.orderService = orderService;
+        this.distributedLock = distributedLock;
     }
 
     @Scheduled(fixedDelay = 60000, initialDelay = 30000)
     public void cancelTimeoutOrders() {
         try {
-            int cancelled = orderService.cancelTimeoutOrders(timeoutMinutes);
-            if (cancelled > 0) {
-                log.info("[订单超时调度] 本轮自动取消 {} 笔超时未支付订单（超时阈值 {} 分钟）", cancelled, timeoutMinutes);
+            // 多实例互斥：本轮只让一个实例扫描。
+            // fail-open：Redis 不可用时仍然执行——宁可多扫一遍，也不能让超时订单积压占用库存。
+            boolean executed = distributedLock.tryExecuteOnce("order-timeout-scan", 50_000L, true, () -> {
+                int cancelled = orderService.cancelTimeoutOrders(timeoutMinutes);
+                if (cancelled > 0) {
+                    log.info("[订单超时调度] 本轮自动取消 {} 笔超时未支付订单（超时阈值 {} 分钟）", cancelled, timeoutMinutes);
+                }
+            });
+            if (!executed) {
+                log.debug("[订单超时调度] 其他实例正在执行本轮扫描，跳过");
             }
         } catch (Exception e) {
             log.error("[订单超时调度] 执行失败", e);

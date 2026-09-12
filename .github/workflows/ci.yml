@@ -1,0 +1,86 @@
+name: CI
+
+# 触发：推送到主干、以及所有 PR
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ============================================================
+  # 1) 单元测试 + 集成测试（GitHub runner 自带 Docker，Testcontainers 会真跑，不会 skip）
+  # ============================================================
+  test:
+    name: 测试（单测 + Testcontainers 集成测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: mvn verify（90 单测 + DbLayerIT/RedisLayerIT）
+        # Mockito 的 inline mock maker 在某些环境需要显式允许 self-attach
+        run: mvn -B verify -DargLine=-Djdk.attach.allowAttachSelf=true
+
+      - name: 上传测试报告（失败也要看）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          if-no-files-found: ignore
+
+  # ============================================================
+  # 2) 一键部署冒烟：docker compose 起三容器，等健康，验证接口与前端页面
+  # ============================================================
+  compose-smoke:
+    name: docker compose 一键部署冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 .env
+        run: |
+          cp .env.example .env
+          sed -i 's/^MYSQL_ROOT_PASSWORD=.*/MYSQL_ROOT_PASSWORD=ci-root-pass/' .env
+
+      - name: 构建并启动
+        run: docker compose up -d --build
+
+      - name: 等待应用就绪（最多 5 分钟）
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8083/actuator/health > /tmp/health.json 2>/dev/null; then
+              echo "第 $i 次探测：" && cat /tmp/health.json && exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::应用在 5 分钟内未就绪"
+          exit 1
+
+      - name: 断言健康、前端同源托管、缓存摘要接口
+        run: |
+          set -e
+          curl -fsS http://localhost:8083/actuator/health | grep -q '"status":"UP"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/dashboard.html)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/api/product/cache/summary)" = "200"
+          # 内部统计接口必须对游客关闭（v3.3 加固点，CI 里也守一道）
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/api/product/cache/stats)" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8083/actuator/metrics)" = "404"
+          echo "冒烟断言全部通过"
+
+      - name: 失败时打印容器日志
+        if: failure()
+        run: docker compose logs --tail 150
+
+      - name: 清理
+        if: always()
+        run: docker compose down -v
