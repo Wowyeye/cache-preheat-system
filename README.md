@@ -11,6 +11,8 @@ AIGC:
 
 # 热点数据缓存预热与缓存一致性保障系统 v3
 
+![CI](https://github.com/Wowyeye/cache-preheat-system/actions/workflows/ci.yml/badge.svg)
+
 > Spring Boot 3.2 + Redis 7 + MyBatis + MySQL 8 + Vue3 + ECharts
 > —— 带自动热点识别、可视化监控、订单状态机与多级防并发问题的**工程级**缓存系统
 
@@ -86,6 +88,13 @@ v3.1 又在**运行中的实例**上逐条实测复核，修掉了 15 项"声明
 | 3 | `/actuator/metrics`、`/actuator/info` 匿名可读（信息泄露面） | Actuator 只暴露 `health`（compose/K8s 探针用），`show-details: never`；实测 metrics/info 均 404 |
 | 4 | 前端把管理员按钮暴露给所有人（点了才报 401/403） | 监控大盘的运维区、热点页"立即预热"、耗时对比的"运行实验"按角色隐藏/禁用，并给出原因提示 |
 | 5 | Spring Boot 3.2.5 已过 OSS 支持期，且随附 spring-web 6.1.6 / tomcat-embed 10.1.20 带有已修 CVE | 升到 **3.2.12**（3.2 线最后一版）：Spring Framework **6.1.15**、tomcat-embed-core **10.1.33**；同小版本升级，90 单测 + 11 集成测试全绿，容器内实测启动正常 |
+| 6 | **没有 CI**：测试、构建、部署全靠手工跑，改完没人替你守 | 新增 `.github/workflows/ci.yml`：① `mvn verify`（GitHub runner 自带 Docker，Testcontainers 集成测试**真跑不跳过**）；② docker compose 一键部署冒烟——等健康后断言前端页面 200、`/cache/summary` 200、`/cache/stats` 401、`/actuator/metrics` 404 |
+| 7 | **Web 层契约只用手工 curl 验过一次**（上一轮修的 401/403/404/405/400/429 重构就可能回退） | 新增 `WebLayerContractTest`（MockMvc，**15 项**）把权限矩阵与错误码钉成断言；顺带把 `@MapperScan` 从启动类挪到 `config/MyBatisConfig`——挂在启动类上会让 `@WebMvcTest` 切片也去创建 MyBatis Mapper 而缺 `SqlSessionFactory` |
+| 8 | **定时任务没有多实例语义**：`@Scheduled` 在每个实例都触发，预热被重复执行、`autoPreheatRounds` 被重复累加 | `DistributedLock.tryExecuteOnce` 租约抢占：预热 **fail-closed**（下轮再来）、订单超时扫描 **fail-open**（宁可多扫不能漏扫）。**实测两个实例并行 140 秒只 +2 轮**（修复前 +5），日志可见 `已由其他实例执行，跳过` |
+
+> 关于第 8 条的关键教训：最初实现是"任务跑完就 unlock"，实测两个实例的 60 秒定时器**相位不同**——
+> A 跑完立刻放锁，B 十秒后触发又抢到这把空锁，一轮被跑了两次（130 秒 +5 轮）。
+> 改成"**持有租约到本轮结束、不主动释放**"（ShedLock 的思路）后才真正互斥。
 
 ---
 
@@ -255,9 +264,10 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 层级 | 命令 | 覆盖 | 状态 |
 |------|------|------|------|
-| 单元测试 | `.\mvnw.cmd test` | **90 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机/可信代理与 XFF 防伪造 | ✅ 实测全绿（BUILD SUCCESS） |
+| 单元测试 | `.\mvnw.cmd test` | **110 项**：状态机/条件更新防双回补/防超卖/逐单事务超时取消/分布式锁/**定时任务租约互斥**/限流/热点防污染与裁剪/序列化白名单/延迟双删 afterCommit/SafeRedis 降级与 SCAN/熔断状态机/可信代理与 XFF 防伪造/**Web 层契约 15 项** | ✅ 实测全绿 |
 | Redis 层集成测试 | `.\mvnw.cmd verify` | Testcontainers 真实 `redis:7-alpine` 容器：生产序列化配置往返、空哨兵值、SCAN、ZSet 热度 | ✅ **实测真跑通过**（4/4，无 Docker 时如实 skip） |
 | 数据库层集成测试 | `.\mvnw.cmd verify` | `DbLayerIT`：Testcontainers **真实 MySQL 8 + Redis 7** + 完整 Spring 上下文 + Flyway：迁移版本/原子扣减/条件状态更新/下单取消全链路/**并发双取消只回补一次**/Cache Aside/穿透标记 | ✅ **实测真跑通过**（7/7，无 Docker 时如实 skip） |
+| 持续集成 | push / PR 自动触发 | `.github/workflows/ci.yml`：`mvn verify` + compose 部署冒烟 | ✅ 已接入（见仓库 Actions 徽章） |
 | 构建 | `.\mvnw.cmd clean package` | 可执行 fat jar | ✅ 实测（58 MB / `BOOT-INF/lib` 89 项）；**需先停掉正在运行的实例**（Windows 文件占用） |
 
 > **环境提示 A**：若 `mvn test` 出现 `MockitoInitializationException: Could not self-attach to current VM`，
@@ -307,7 +317,7 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 
 | 项 | 状态 | 证据 |
 |----|------|------|
-| 33 → 90 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
+| 33 → 110 单测 | ✅ 通过 | `mvn test` BUILD SUCCESS，Failures/Errors/Skipped 全 0 |
 | fat jar 构建 | ✅ 通过 | 58,453,755 B，`BOOT-INF/lib` 89 项 |
 | 登录 / 权限矩阵 | ✅ 通过 | `admin/admin123` 登录 200；普通用户访问管理接口 403；未登录管理接口 401；无效 token 401 |
 | Cache Aside 命中 | ✅ 通过 | 二次查询走缓存；统计 hit/miss、缓存 4.86ms vs DB 14.03ms |
@@ -349,6 +359,9 @@ PENDING_PAYMENT --支付--> PAID --确认收货--> COMPLETED
 | 依赖版本 | 已升到 Spring Boot **3.2.12**（3.2 线最后一版，含 spring-web/tomcat CVE 修复）；但 3.2.x 整条线已停止 OSS 支持 | 若要继续跟进：3.3/3.4 属于小版本迁移（MyBatis-Starter、Redisson、Flyway 需同步验证）；4.x 是更大的迁移（Spring Framework 7 / 模块化），建议单独开分支做 |
 | Redis 故障期首请求仍有 ~0.5s | 熔断把"每个请求都等超时"变成"只等一次"：首次失败仍要等一次连接/命令超时（已把 Redisson 调成 `timeout/connectTimeout=2s`、`retryAttempts=1`、`retryInterval=500ms`） | 若还要更低：把 `redis.timeout` 调到 500ms 级，或让熔断对"连接被拒"这类错误单独更快触发 |
 | 打包与运行互斥 | 应用从 jar 运行时 `mvnw clean package` 会失败（Windows 文件占用） | 先停应用再打包；或用容器内构建 |
+| 定时任务租约的取舍 | 抢占后持有租约到本轮结束（≈调度间隔 50s/60s）。实例在任务中途崩溃时，**最多会跳过一轮**（下下轮恢复），换来的是"同一轮绝不重复执行" | 需要"绝不漏跑"的任务（如对账）应改成持久化任务表 + 重试，而不是靠租约锁 |
+| 部分列表接口未分页 | `GET /api/product/list`、`GET /api/admin/order/list`、`GET /api/category/list` 仍是全量返回（当前数据量小） | 数据量上来后统一改成与 `/product/page` 一致的分页接口 |
+| 写接口限流只盖了登录 | 下单等写接口没有频率限制 | 按需复用 `RateLimiter` 加维度（用户 + 接口） |
 
 > **一句话总结**：v3 把 v2 的"架构级缺陷"补成了工程实现，v3.1 把"实现与声明"之间的差距补平了，
 > v3.2 又把"只有文档、没有实测证据"的两条（compose 一键部署、Testcontainers 集成测试）真正跑通了。
