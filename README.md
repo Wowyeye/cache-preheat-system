@@ -1,14 +1,3 @@
----
-AIGC:
-  ContentProducer: '001191110102MAD55U9H0F10002'
-  ContentPropagator: '001191110102MAD55U9H0F10002'
-  Label: '1'
-  ProduceID: '8d53b806-0be1-44ab-827a-1a8bc1b24124'
-  PropagateID: '8d53b806-0be1-44ab-827a-1a8bc1b24124'
-  ReservedCode1: '712dc4f1-61eb-4cc3-900d-76472536dca3'
-  ReservedCode2: '712dc4f1-61eb-4cc3-900d-76472536dca3'
----
-
 # 热点数据缓存预热与缓存一致性保障系统 v3
 
 ![CI](https://github.com/Wowyeye/cache-preheat-system/actions/workflows/ci.yml/badge.svg)
